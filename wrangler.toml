@@ -1,0 +1,43 @@
+name = "frameforge"
+main = "worker/src/index.ts"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Static assets served by the Worker (user portal + admin portal)
+assets = { directory = "./frontend", binding = "ASSETS" }
+
+# D1 database for metadata (users, jobs, frames)
+[[d1_databases]]
+binding = "DB"
+database_name = "photos_from_videos"
+database_id = "81a5cf89-ac9c-4d0d-9c30-5829021f4215"
+
+# R2 bucket for video/frame binary data (private)
+[[r2_buckets]]
+binding = "R2"
+bucket_name = "photos-from-video"
+
+# ────────────────────────────── Deployment ──────────────────────────────
+# Uncomment + set your domain once the zone is added to Cloudflare.
+# routes = [
+#   { pattern = "YOUR_DOMAIN.com", custom_domain = true },
+# ]
+
+# ────────────────────────────── Environment ─────────────────────────────
+# Secrets are set via:  wrangler secret put <NAME>
+# (never commit real values to git — use .dev.vars for local dev)
+# Required secrets:
+#   AUTH_SECRET            - JWT signing secret
+#   ADMIN_SETUP_TOKEN      - one-time token to bootstrap the first admin
+#   R2_ACCESS_KEY_ID       - S3 API access key (for presigned URLs)
+#   R2_SECRET_ACCESS_KEY   - S3 API secret key
+#   R2_ENDPOINT            - e.g. https://<account>.r2.cloudflarestorage.com
+#   R2_BUCKET_NAME         - bucket name
+#   D1_DATABASE_ID         - database id (must match [[d1_databases]] above)
+
+[vars]
+# Non-secret defaults (override via secrets where sensitive)
+MAX_UPLOAD_SIZE = "2147483648"   # 2 GB
+MAX_FRAMES = "5000"
+RATE_LIMIT_PER_MIN = "120"
+ASSET_CACHE_TTL = "0"

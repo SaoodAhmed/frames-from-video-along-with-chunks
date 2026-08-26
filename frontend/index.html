@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>KENDUIT — Video Upload</title>
+  <link rel="stylesheet" href="/css/frameforge.css" />
+</head>
+<body>
+  <!-- Auth view -->
+  <div id="view-auth" class="auth-wrap">
+    <div class="card auth-card">
+      <div class="brand" style="padding:0 0 16px;">
+        <span class="logo">KEN<span class="accent">DUIT</span></span>
+        <span class="ver">v3.1 web</span>
+      </div>
+      <div class="auth-tabs">
+        <button id="tab-login" class="active" type="button">Login</button>
+        <button id="tab-register" type="button">Register</button>
+      </div>
+
+      <form id="auth-form">
+        <div class="field">
+          <label for="auth-email">Email</label>
+          <input id="auth-email" class="input" type="email" autocomplete="email" required placeholder="you@example.com" />
+        </div>
+        <div class="field">
+          <label for="auth-password">Password</label>
+          <input id="auth-password" class="input" type="password" autocomplete="current-password" required placeholder="••••••••" />
+        </div>
+        <button class="btn block" id="auth-submit" type="submit">Login</button>
+        <div class="auth-err" id="auth-err"></div>
+      </form>
+    </div>
+  </div>
+
+  <!-- App view -->
+  <div id="view-app" class="app-shell hidden">
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="logo">KEN<span class="accent">DUIT</span></span>
+        <span class="ver">v3.1 web</span>
+      </div>
+      <div class="nav">
+        <a href="#" data-nav="videos" class="active">My Videos</a>
+      </div>
+      <div class="sidebar-footer">
+        <div class="user-email" id="user-email"></div>
+        <button class="btn ghost small block" id="btn-logout" type="button">Log out</button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="toolbar">
+        <h1>My Videos</h1>
+        <span class="toolbar-note" id="library-note">—</span>
+        <div class="spacer"></div>
+        <button class="btn" id="btn-upload" type="button">+ Upload Video</button>
+      </div>
+
+      <!-- Upload panel -->
+      <div id="upload-panel" class="card hidden mb-20">
+        <div id="dropzone" class="dropzone">
+          <div class="dz-title">Drag &amp; Drop video here</div>
+          <div class="dz-sub">or click to Browse · MP4, MOV, AVI, MKV, WEBM</div>
+          <input id="file-input" type="file" class="hidden" accept="video/*,.mp4,.mov,.avi,.mkv,.webm" />
+        </div>
+        <div id="upload-progress-wrap" class="hidden mt-12">
+          <div class="progress"><span id="upload-progress-bar"></span></div>
+          <div class="progress-bar-label" id="upload-progress-label"></div>
+        </div>
+        <div class="auth-err" id="upload-err"></div>
+      </div>
+
+      <div id="videos-empty" class="empty-state">
+        <div class="empty-icon">🎞️</div>
+        <div>No videos yet. Upload a video and it will appear here, waiting for processing.</div>
+        <div class="empty-cta"><button class="btn" id="empty-upload" type="button">+ Upload your first video</button></div>
+      </div>
+      <div id="videos-table" class="table-wrap table-scroll hidden">
+        <table>
+          <thead>
+            <tr>
+              <th>Filename</th>
+              <th>Size</th>
+              <th>Duration</th>
+              <th>Uploaded</th>
+              <th>Frames</th>
+              <th>Chunks</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="videos-body"></tbody>
+        </table>
+      </div>
+    </main>
+  </div>
+
+  <div class="toast-wrap" id="toast-wrap"></div>
+  <script src="/js/api.js"></script>
+  <script src="/js/user.js"></script>
+</body>
+</html>

@@ -1,0 +1,26 @@
+{
+  "name": "@frameforge/worker",
+  "version": "3.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --config ../wrangler.toml",
+    "deploy": "wrangler deploy --config ../wrangler.toml",
+    "deploy:dry": "wrangler deploy --dry-run --config ../wrangler.toml",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local --config ../wrangler.toml",
+    "db:migrate:remote": "wrangler d1 migrations apply DB --remote --config ../wrangler.toml"
+  },
+  "dependencies": {
+    "hono": "^4.6.14"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.9.0",
+    "@cloudflare/workers-types": "^5.0.0",
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8",
+    "wrangler": "^4.125.0"
+  }
+}

@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>KENDUIT — Admin Portal</title>
+  <link rel="stylesheet" href="/css/frameforge.css" />
+</head>
+<body>
+  <!-- Auth view -->
+  <div id="view-auth" class="auth-wrap">
+    <div class="card auth-card">
+      <div class="brand" style="padding:0 0 16px;">
+        <span class="logo">KEN<span class="accent">DUIT</span></span>
+        <span class="ver">ADMIN</span>
+      </div>
+      <div class="auth-tabs"><button class="active" type="button">Admin Login</button></div>
+      <form id="auth-form">
+        <div class="field">
+          <label for="auth-email">Email</label>
+          <input id="auth-email" class="input" type="email" autocomplete="email" required placeholder="admin@example.com" />
+        </div>
+        <div class="field">
+          <label for="auth-password">Password</label>
+          <input id="auth-password" class="input" type="password" autocomplete="current-password" required placeholder="••••••••" />
+        </div>
+        <button class="btn block" id="auth-submit" type="submit">Login</button>
+        <div class="auth-err" id="auth-err"></div>
+      </form>
+    </div>
+  </div>
+
+  <!-- App view -->
+  <div id="view-app" class="app-shell hidden">
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="logo">KEN<span class="accent">DUIT</span></span>
+        <span class="ver">ADMIN</span>
+      </div>
+      <div class="nav">
+        <a href="#" data-filter="all" class="active">Dashboard</a>
+        <a href="#" data-filter="uploaded">Uploads</a>
+        <a href="#" data-filter="queued">Processing</a>
+        <a href="#" data-filter="completed">Completed</a>
+        <a href="#" data-filter="failed">Failed</a>
+      </div>
+      <div class="sidebar-footer">
+        <div class="user-email" id="user-email"></div>
+        <button class="btn ghost small block" id="btn-logout" type="button">Log out</button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <!-- Videos table view -->
+      <div id="view-videos">
+        <div class="toolbar">
+          <h1 id="view-title">Dashboard</h1>
+          <div class="spacer"></div>
+          <input id="search-input" class="input" style="max-width:240px;" placeholder="Search user or filename…" />
+        </div>
+
+        <div class="grid cols-4 mb-20" id="stats-row">
+          <div class="stat-card">
+            <div class="stat-label"><span class="dot dot-brand"></span>Uploaded</div>
+            <div class="stat-value" id="stat-uploaded">0</div>
+            <div class="stat-sub">waiting for processing</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label"><span class="dot dot-warn"></span>Processing</div>
+            <div class="stat-value" id="stat-queued">0</div>
+            <div class="stat-sub">queued or in progress</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label"><span class="dot dot-ok"></span>Completed</div>
+            <div class="stat-value" id="stat-completed">0</div>
+            <div class="stat-sub">frames extracted</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label"><span class="dot dot-soft"></span>Total</div>
+            <div class="stat-value" id="stat-total">0</div>
+            <div class="stat-sub">all videos on the platform</div>
+          </div>
+        </div>
+
+        <div id="jobs-empty" class="empty-state hidden">
+          <div class="empty-icon">🎬</div>
+          <div>No jobs in this view.</div>
+          <div class="empty-cta"><button class="btn ghost small" id="empty-clear-filter" type="button">Show all jobs</button></div>
+        </div>
+        <div id="jobs-table" class="table-wrap table-scroll hidden">
+          <table>
+            <thead>
+              <tr>
+                <th>User</th><th>Filename</th><th>Size</th><th>Duration</th>
+                <th>Resolution</th><th>Uploaded</th><th>Status</th><th>Frames</th><th>Chunks</th><th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="jobs-body"></tbody>
+          </table>
+        </div>
+        <div class="pager">
+          <button class="btn ghost small" id="prev-page" type="button">‹ Prev</button>
+          <span class="pager-info" id="page-info">Page 1</span>
+          <button class="btn ghost small" id="next-page" type="button">Next ›</button>
+        </div>
+      </div>
+
+      <!-- Job detail view -->
+      <div id="view-job" class="hidden">
+        <div class="toolbar">
+          <button class="btn ghost small" id="back-btn" type="button">← Back</button>
+          <h1 id="job-title">Job</h1>
+          <span class="badge" id="job-status-badge"></span>
+        </div>
+
+        <!-- Job info -->
+        <div class="card mb-20">
+          <div class="meta-grid" id="job-meta"></div>
+          <div class="divider"></div>
+          <div class="row gap-8" id="job-actions"></div>
+          <div class="auth-err" id="job-err"></div>
+        </div>
+
+        <!-- Process config -->
+        <div class="card mb-20" id="process-panel">
+          <h3>Extraction Settings</h3>
+          <div class="row gap-8 mt-12">
+            <label class="muted small">Mode:</label>
+            <select id="mode-select" class="input" style="max-width:200px;">
+              <option value="Every Frame">Every Frame</option>
+              <option value="10 fps">10 fps</option>
+              <option value="5 fps">5 fps</option>
+              <option value="3 fps">3 fps</option>
+              <option value="2 fps">2 fps</option>
+              <option value="1 fps" selected>1 fps</option>
+              <option value="Smart Scene">Smart Scene</option>
+              <option value="1 per 5 s">1 per 5 s</option>
+              <option value="Thumb Strip">Thumb Strip</option>
+              <option value="Custom FPS">Custom FPS</option>
+            </select>
+            <div id="custom-fps-wrap" class="hidden">
+              <label class="muted small">FPS:</label>
+              <input id="custom-fps" class="input" type="number" min="0.1" max="120" step="0.5" value="1" style="width:90px;" />
+            </div>
+          </div>
+          <div class="row gap-8 mt-12">
+            <label class="muted small">Sharpness: <span id="sharp-val">1.0</span></label>
+            <input id="sharpness" type="range" min="0.5" max="3.0" step="0.1" value="1.0" style="width:220px;" />
+            <label class="muted small">Scene threshold: <span id="scene-val">30</span></label>
+            <input id="scene-threshold" type="range" min="5" max="80" step="1" value="30" style="width:220px;" />
+          </div>
+          <button class="btn mt-12" id="start-process" type="button">Start Processing</button>
+        </div>
+
+        <!-- Progress -->
+        <div class="card mb-20 hidden" id="progress-panel">
+          <div class="card-header">
+            <h3>Progress</h3>
+            <span class="badge" id="progress-status-badge"></span>
+          </div>
+          <div class="progress"><span id="progress-bar"></span></div>
+          <div class="progress-bar-label" id="progress-label"></div>
+          <div class="mt-12 progress" style="display:none;" id="chunk-progress-wrap">
+            <span id="chunk-progress-bar"></span>
+          </div>
+          <div class="progress-bar-label" id="chunk-progress-label" style="display:none;"></div>
+        </div>
+
+        <!-- Frame gallery -->
+        <div class="card" id="gallery-panel">
+          <div class="toolbar">
+            <h3>Frame Gallery</h3>
+            <span class="toolbar-note">extracted frames</span>
+            <div class="spacer"></div>
+            <span class="pager-info" id="sel-count">0 selected</span>
+            <button class="btn ghost small" id="select-all" type="button">Select all</button>
+            <button class="btn ghost small" id="deselect-all" type="button">Deselect</button>
+            <button class="btn danger small" id="delete-selected" type="button">Delete selected</button>
+            <button class="btn small" id="export-all" type="button">ZIP all</button>
+            <button class="btn small" id="export-selected" type="button">ZIP selected</button>
+          </div>
+          <div id="gallery-empty" class="empty-state hidden">
+            <div class="empty-icon">🖼️</div>
+            <div>No frames extracted yet.</div>
+            <div class="empty-cta"><button class="btn small" id="empty-start-process" type="button">Start processing</button></div>
+          </div>
+          <div class="gallery" id="gallery"></div>
+          <div class="pager" id="gallery-pager">
+            <button class="btn ghost small" id="gal-prev" type="button">‹ Prev</button>
+            <span class="pager-info" id="gal-info">0 frames</span>
+            <button class="btn ghost small" id="gal-next" type="button">Next ›</button>
+          </div>
+        </div>
+
+        <!-- Chunks (scene-based split) -->
+        <div class="card" id="chunks-panel">
+          <div class="toolbar">
+            <h3>Scene Chunks</h3>
+            <span class="badge" id="chunk-status-badge" style="margin-left:8px;"></span>
+            <div class="spacer"></div>
+            <span class="pager-info" id="chunk-sel-count">0 selected</span>
+            <button class="btn ghost small" id="chunk-select-all" type="button">Select all</button>
+            <button class="btn ghost small" id="chunk-deselect-all" type="button">Deselect</button>
+            <button class="btn danger small" id="chunk-delete-selected" type="button">Delete selected</button>
+            <button class="btn small" id="chunk-export-all" type="button">ZIP all</button>
+            <button class="btn small" id="chunk-export-selected" type="button">ZIP selected</button>
+          </div>
+          <div id="chunks-empty" class="empty-state hidden">
+            <div class="empty-icon">✂️</div>
+            <div>No chunks yet. Split this video by background change.</div>
+            <div class="empty-cta"><button class="btn small" id="empty-split" type="button">Split into Chunks</button></div>
+          </div>
+          <div class="gallery" id="chunks-gallery"></div>
+          <div class="pager" id="chunks-pager">
+            <button class="btn ghost small" id="chunk-prev" type="button">‹ Prev</button>
+            <span class="pager-info" id="chunk-info">0 chunks</span>
+            <button class="btn ghost small" id="chunk-next" type="button">Next ›</button>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Export status modal -->
+  <div class="modal-backdrop hidden" id="export-modal">
+    <div class="modal">
+      <div class="modal-header"><h3>Export</h3><button class="btn ghost small" id="export-close" type="button">Close</button></div>
+      <div class="modal-body">
+        <div class="row gap-8" id="export-status-row">
+          <div class="spinner"></div>
+          <span id="export-status-text">Creating ZIP…</span>
+        </div>
+        <div class="auth-err" id="export-err"></div>
+      </div>
+      <div class="modal-footer" id="export-footer" style="display:none;">
+        <a id="export-download" class="btn" download>Download ZIP</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- Frame preview modal -->
+  <div class="modal-backdrop hidden" id="preview-modal">
+    <div class="modal">
+      <div class="modal-header">
+        <h3 id="preview-title">Frame Preview</h3>
+        <button class="btn ghost small" id="preview-close" type="button">Close</button>
+      </div>
+      <div class="modal-body">
+        <div class="preview-img-wrap"><img id="preview-img" alt="frame" /></div>
+        <div class="pager" id="preview-pager">
+          <button class="btn ghost small" id="preview-prev" type="button">‹ Prev</button>
+          <span class="pager-info" id="preview-info"></span>
+          <button class="btn ghost small" id="preview-next" type="button">Next ›</button>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <a id="preview-download" class="btn" download>Download JPEG</a>
+        <button class="btn ghost" id="preview-toggle-select" type="button">Select</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast-wrap" id="toast-wrap"></div>
+  <script src="/js/api.js"></script>
+  <script src="/js/admin.js"></script>
+</body>
+</html>

@@ -1,0 +1,20 @@
+{
+  "name": "frameforge",
+  "version": "3.1.0",
+  "private": true,
+  "description": "FrameForge — production multi-user video frame extraction on Cloudflare (D1 + R2 + Worker) with a Modal serverless OpenCV processor",
+  "workspaces": [
+    "worker"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace worker",
+    "deploy": "npm run deploy --workspace worker",
+    "migrate:local": "wrangler d1 migrations apply DB --local",
+    "migrate:prod": "wrangler d1 migrations apply DB --remote",
+    "seed:admin": "node worker/scripts/seed-admin.mjs",
+    "test": "npm run test --workspace worker"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

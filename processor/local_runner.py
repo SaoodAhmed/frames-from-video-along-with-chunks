@@ -1,0 +1,466 @@
+#!/usr/bin/env python3
+"""Local FrameForge extraction runner (no Modal needed).
+
+Polls the Worker for queued jobs and extracts frames using the same OpenCV
+logic as the serverless processor.
+
+Frame JPEGs are written DIRECTLY to R2 via boto3 (the R2 S3 credentials come
+from the repo .env R2_* vars), so the heavy bytes never cross the Worker proxy.
+Only the small D1 state changes (frames-row insert, progress, complete/fail) go
+through the Worker's /api/processor/* routes.
+
+Needs:
+    WORKER_BASE_URL  (default https://frameforge.ahmedsauddd128.workers.dev)
+    PROCESSOR_TOKEN  (matches the Worker's PROCESSOR_TOKEN secret)
+
+Usage:
+    WORKER_BASE_URL=... PROCESSOR_TOKEN=... python processor/local_runner.py
+    python processor/local_runner.py --once   # process current queue and exit
+"""
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import zipfile
+
+import boto3
+import cv2
+import requests
+from botocore.config import Config as BotoConfig
+
+# config.py requires the PROCESSOR_* vars at import. Satisfy them from the
+# repo's .env (read-only) so the runner stays self-contained.
+def _load_dotenv(path):
+    env = {}
+    try:
+        for line in open(path, encoding="utf-8"):
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                env[k.strip()] = v.strip()
+    except OSError:
+        pass
+    return env
+
+
+_ENV_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+_DOTENV = _load_dotenv(_ENV_FILE)
+
+# .env key -> config.py env var (config expects PROCESSOR_R2_BUCKET, not _NAME)
+for _src, _dst in (
+    ("R2_ACCOUNT_ID", "PROCESSOR_R2_ACCOUNT_ID"),
+    ("R2_ACCESS_KEY_ID", "PROCESSOR_R2_ACCESS_KEY_ID"),
+    ("R2_SECRET_ACCESS_KEY", "PROCESSOR_R2_SECRET_ACCESS_KEY"),
+    ("R2_BUCKET_NAME", "PROCESSOR_R2_BUCKET"),
+    ("R2_ENDPOINT", "PROCESSOR_R2_ENDPOINT"),
+):
+    if _DOTENV.get(_src) and not os.environ.get(_dst):
+        os.environ[_dst] = _DOTENV[_src]
+# D1 writes route through the Worker, so the D1 client vars are just placeholders.
+for _k in ("PROCESSOR_D1_ACCOUNT_ID", "PROCESSOR_D1_DATABASE_ID", "PROCESSOR_D1_API_TOKEN"):
+    os.environ.setdefault(_k, "unused")
+
+import config  # noqa: E402
+import extractor  # noqa: E402
+import scene_chunks  # noqa: E402
+
+BASE = os.environ.get("WORKER_BASE_URL", "https://frameforge.ahmedsauddd128.workers.dev").rstrip("/")
+TOKEN = os.environ.get("PROCESSOR_TOKEN", "").strip()
+POLL_INTERVAL = float(os.environ.get("PROCESSOR_POLL_INTERVAL", "5"))
+PROGRESS_EVERY = config.PROGRESS_INTERVAL
+RETRIES = int(os.environ.get("PROCESSOR_RETRIES", "4"))
+
+R2 = boto3.client(
+    "s3",
+    endpoint_url=config.R2_ENDPOINT,
+    aws_access_key_id=config.R2_ACCESS_KEY_ID,
+    aws_secret_access_key=config.R2_SECRET_ACCESS_KEY,
+    region_name="auto",
+    config=BotoConfig(retries={"max_attempts": 4, "mode": "standard"}),
+)
+R2_BUCKET = config.R2_BUCKET
+
+TRANSIENT = (0, 408, 429, 500, 502, 503, 504)
+
+
+class JobAborted(Exception):
+    """Job left 'processing' (cancelled/re-queued) — stop cleanly, no /fail."""
+
+
+def _headers(content_type="application/json"):
+    h = {"Authorization": f"Bearer {TOKEN}"}
+    if content_type:
+        h["Content-Type"] = content_type
+    return h
+
+
+def _req(method, path, body=None, raw_body=None, content_type="application/json", timeout=300):
+    # urllib's TLS/HTTP stack is flagged by Cloudflare bot protection (403 /
+    # stalled reads); `requests` (urllib3) passes cleanly, so all Worker calls go
+    # through requests.
+    ct = content_type if raw_body is None else (content_type or "application/octet-stream")
+    try:
+        resp = requests.request(
+            method,
+            f"{BASE}{path}",
+            data=raw_body if raw_body is not None else json.dumps(body or {}),
+            headers=_headers(ct),
+            timeout=timeout,
+        )
+    except requests.RequestException as e:
+        return 0, {"error": f"request failed: {e}"}
+    try:
+        return resp.status_code, resp.json() if resp.text else {}
+    except ValueError:
+        return resp.status_code, {"error": resp.text[:500]}
+
+
+def _req_ok(method, path, body=None, raw_body=None, content_type="application/json", timeout=300, what="request"):
+    """Worker call with retry/backoff. 409 -> JobAborted. 200 -> parsed JSON."""
+    status, data = 0, {}
+    for attempt in range(RETRIES):
+        status, data = _req(method, path, body, raw_body, content_type, timeout)
+        if status in TRANSIENT and attempt < RETRIES - 1:
+            wait = 2 ** attempt
+            print(f"  retry {what} ({attempt + 1}/{RETRIES}) after {wait}s: HTTP {status}", flush=True)
+            time.sleep(wait)
+            continue
+        break
+    if status == 409:
+        raise JobAborted(data.get("error") or "job left processing")
+    if status != 200:
+        raise RuntimeError(f"{what} failed HTTP {status}: {data}")
+    return data
+
+
+def _put_r2(key, data, content_type):
+    R2.put_object(Bucket=R2_BUCKET, Key=key, Body=data, ContentType=content_type)
+
+
+def _put_r2_retry(key, data, content_type, what):
+    for attempt in range(RETRIES):
+        try:
+            _put_r2(key, data, content_type)
+            return
+        except Exception as e:  # noqa: BLE001
+            if attempt >= RETRIES - 1:
+                raise RuntimeError(f"giving up on R2 {what}: {e}")
+            wait = 2 ** attempt
+            print(f"  retry R2 {what} ({attempt + 1}/{RETRIES}) after {wait}s: {e}", flush=True)
+            time.sleep(wait)
+
+
+def _r2_get_bytes(key):
+    """Download an R2 object to memory (frames/chunks are small enough)."""
+    obj = R2.get_object(Bucket=R2_BUCKET, Key=key)
+    return obj["Body"].read()
+
+
+def _download_r2(key, dest):
+    """Stream an R2 object to a local file (used for chunk videos)."""
+    obj = R2.get_object(Bucket=R2_BUCKET, Key=key)
+    with open(dest, "wb") as f:
+        shutil.copyfileobj(obj["Body"], f)
+
+
+def _run_ffmpeg(args, timeout=600):
+    """Run ffmpeg with the stream-copy flags from the desktop app; raise on failure."""
+    if shutil.which(config.FFMPEG) is None:
+        raise RuntimeError("ffmpeg not found on PATH — required for chunk splitting")
+    cmd = [
+        config.FFMPEG,
+        "-y",
+    ] + list(args)
+    kw = {"creationflags": 0x08000000} if os.name == "nt" else {}  # CREATE_NO_WINDOW
+    r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, **kw)
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.decode(errors="replace")[-400:])
+
+
+def get_queue():
+    _, data = _req("GET", "/api/processor/queue")
+    return data.get("jobs") or []
+
+
+def get_chunk_queue():
+    _, data = _req("GET", "/api/processor/queue/chunks")
+    return data.get("jobs") or []
+
+
+def get_export_queue():
+    _, data = _req("GET", "/api/processor/exports/queue")
+    return data.get("exports") or []
+
+
+def process_job(job_id):
+    print(f"[{job_id}] claim", flush=True)
+    status, data = _req("POST", f"/api/processor/claim/{job_id}")
+    if status != 200:
+        print(f"[{job_id}] claim failed {status}: {data}", flush=True)
+        return
+    job = data.get("job") or {}
+    user_id = job.get("user_id") or ""
+
+    local = None
+    try:
+        print(f"[{job_id}] fetching video URL", flush=True)
+        _, vdata = _req("GET", f"/api/processor/video/{job_id}")
+        url = vdata.get("url")
+        if not url:
+            raise RuntimeError("no video URL returned")
+
+        safe = "".join(c for c in (job.get("original_filename") or "video.mp4") if c.isalnum() or c in "._-") or "video.mp4"
+        local = os.path.join(tempfile.gettempdir(), f"frameforge_{job_id}_{safe}")
+        print(f"[{job_id}] downloading to {local}", flush=True)
+        with requests.get(url, stream=True, timeout=300) as resp:
+            resp.raise_for_status()
+            with open(local, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=1 << 20):
+                    if chunk:
+                        f.write(chunk)
+
+        fps = job.get("extraction_fps")
+        if fps is None:
+            fps = 1.0
+        sharpness = float(job.get("sharpness") or 1.0)
+        scene_threshold = float(job.get("scene_threshold") or config.SCENE_THRESHOLD_DEFAULT)
+
+        gen = extractor.extract_frames(local, fps, sharpness=sharpness, scene_threshold=scene_threshold)
+        count = 0
+        meta = None
+        last_progress = -PROGRESS_EVERY
+        for fr in gen:
+            count += 1
+            fn = fr["frame_number"]
+            full_key = config.full_frame_key(user_id, job_id, fn)
+            thumb_key = config.thumb_frame_key(user_id, job_id, fn)
+            _put_r2_retry(full_key, fr["full_bytes"], "image/jpeg", f"full {fn}")
+            _put_r2_retry(thumb_key, fr["thumb_bytes"], "image/jpeg", f"thumb {fn}")
+            q = f"?src={fr['source_frame_number']}&t={fr['timestamp']:.3f}&w={fr['width']}&h={fr['height']}"
+            _req_ok("POST", f"/api/processor/frame/{job_id}/{fn}/meta{q}", what=f"meta {fn}")
+
+            if count - last_progress >= PROGRESS_EVERY or fr["frame_number"] % max(1, fr["total"] or 1) == 0:
+                _req_ok("POST", f"/api/processor/progress/{job_id}",
+                        {"processed": fr["processed"], "total": fr["total"]}, what="progress")
+                last_progress = count
+            meta = fr
+            print(f"[{job_id}] frame {fn}/{meta['total']}", flush=True)
+
+        if meta is None:
+            raise RuntimeError("no frames extracted")
+
+        complete_body = {
+            "srcFps": meta["src_fps"],
+            "total": meta["total"],
+            "width": meta["width"],
+            "height": meta["height"],
+            "duration": (meta["total"] / meta["src_fps"]) if meta["src_fps"] else 0,
+            "extracted": count,
+        }
+        s, cdata = _req("POST", f"/api/processor/complete/{job_id}", complete_body)
+        print(f"[{job_id}] complete {s}: {cdata}", flush=True)
+    except JobAborted as e:
+        print(f"[{job_id}] aborted: {e}", flush=True)
+    except Exception as e:
+        print(f"[{job_id}] ERROR: {e}", flush=True)
+        _req("POST", f"/api/processor/fail/{job_id}", {"message": str(e)})
+    finally:
+        if local and os.path.exists(local):
+            try:
+                os.remove(local)
+            except OSError:
+                pass
+
+
+def process_chunks(job_id):
+    """Scene-change splitting: ffmpeg stream-copy each chunk -> direct R2 upload."""
+    print(f"[{job_id}] chunk claim", flush=True)
+    status, data = _req("POST", f"/api/processor/chunk/claim/{job_id}")
+    if status != 200:
+        print(f"[{job_id}] chunk claim failed {status}: {data}", flush=True)
+        return
+    job = data.get("job") or {}
+    user_id = job.get("user_id") or ""
+
+    local = None
+    tmpdir = None
+    try:
+        print(f"[{job_id}] fetching video URL for chunk split", flush=True)
+        _, vdata = _req("GET", f"/api/processor/video/{job_id}")
+        url = vdata.get("url")
+        if not url:
+            raise RuntimeError("no video URL returned")
+
+        safe = "".join(c for c in (job.get("original_filename") or "video.mp4") if c.isalnum() or c in "._-") or "video.mp4"
+        local = os.path.join(tempfile.gettempdir(), f"frameforge_chunk_{job_id}_{safe}")
+        print(f"[{job_id}] downloading to {local}", flush=True)
+        with requests.get(url, stream=True, timeout=600) as resp:
+            resp.raise_for_status()
+            with open(local, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=1 << 20):
+                    if chunk:
+                        f.write(chunk)
+
+        cap = cv2.VideoCapture(local)
+        if not cap.isOpened():
+            raise RuntimeError("cannot open downloaded video")
+        src_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or None
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or None
+        cap.release()
+        duration = (total / src_fps) if total and src_fps else 0.0
+
+        chunks = scene_chunks.detect_scene_chunks(local, src_fps, end_sec=duration)
+        if not chunks:
+            raise RuntimeError("scene detection produced no chunks")
+
+        tmpdir = tempfile.mkdtemp(prefix=f"frameforge_chunks_{job_id}_")
+        print(f"[{job_id}] {len(chunks)} chunk(s) detected", flush=True)
+        for i, (cs, ce) in enumerate(chunks, start=1):
+            out_path = os.path.join(tmpdir, f"chunk_{i:04d}.mp4")
+            dur = ce - cs
+            # Re-encode (like local_trimer-6.py) so cuts are frame-accurate and
+            # chunks are exactly contiguous — stream-copy rounds to keyframes.
+            _run_ffmpeg([
+                "-ss", f"{cs:.6f}",
+                "-i", local,
+                "-t", f"{dur:.6f}",
+                "-c:v", "libx264",
+                "-crf", "18",
+                "-preset", "fast",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-pix_fmt", "yuv420p",
+                "-avoid_negative_ts", "make_zero",
+                "-movflags", "+faststart",
+                out_path,
+            ])
+            size = os.path.getsize(out_path)
+            if size == 0:
+                raise RuntimeError(f"ffmpeg produced empty chunk {i}")
+
+            key = config.chunk_video_key(user_id, job_id, i)
+            with open(out_path, "rb") as f:
+                _put_r2_retry(key, f.read(), "video/mp4", f"chunk {i}")
+            os.remove(out_path)
+
+            q = (
+                f"?start={cs:.6f}&end={ce:.6f}&duration={dur:.6f}"
+                f"&size={size}&w={width}&h={height}&fps={src_fps:.6f}"
+            )
+            _req_ok("POST", f"/api/processor/chunk/{job_id}/{i}/meta{q}", what=f"chunk meta {i}")
+
+            if i % max(1, len(chunks) // 10) == 0 or i == len(chunks):
+                _req_ok("POST", f"/api/processor/chunk/progress/{job_id}",
+                        {"processed": i, "total": len(chunks)}, what="chunk progress")
+            print(f"[{job_id}] chunk {i}/{len(chunks)} ({cs:.2f}-{ce:.2f}s)", flush=True)
+
+        _req_ok("POST", f"/api/processor/chunk/complete/{job_id}", {
+            "count": len(chunks),
+            "duration": duration,
+            "width": width,
+            "height": height,
+            "srcFps": src_fps,
+        }, what="chunk complete")
+        print(f"[{job_id}] chunks complete: {len(chunks)}", flush=True)
+    except JobAborted as e:
+        print(f"[{job_id}] chunk aborted: {e}", flush=True)
+    except Exception as e:
+        print(f"[{job_id}] chunk ERROR: {e}", flush=True)
+        _req("POST", f"/api/processor/chunk/fail/{job_id}", {"message": str(e)})
+    finally:
+        if local and os.path.exists(local):
+            try:
+                os.remove(local)
+            except OSError:
+                pass
+        if tmpdir:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def process_export(export_id):
+    """Build a ZIP of frames/chunks from R2 and upload it back to R2."""
+    print(f"[{export_id}] export claim", flush=True)
+    status, data = _req("POST", f"/api/processor/exports/{export_id}/claim")
+    if status != 200:
+        print(f"[{export_id}] export claim failed {status}: {data}", flush=True)
+        return
+
+    tmpdir = None
+    try:
+        s, edata = _req("GET", f"/api/processor/exports/{export_id}")
+        if s != 200:
+            raise RuntimeError(f"fetch export failed HTTP {s}: {edata}")
+        export_key = edata.get("exportKey")
+        items = edata.get("items") or []
+        if not export_key or not items:
+            raise RuntimeError("export has no target key or items")
+
+        tmpdir = tempfile.mkdtemp(prefix=f"frameforge_export_{export_id}_")
+        zip_path = os.path.join(tmpdir, "export.zip")
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for it in items:
+                key = it.get("key")
+                name = it.get("name") or os.path.basename(key or "item")
+                item_path = os.path.join(tmpdir, name)
+                _download_r2(key, item_path)
+                zf.write(item_path, name)
+                os.remove(item_path)
+
+        size = os.path.getsize(zip_path)
+        with open(zip_path, "rb") as f:
+            _put_r2_retry(export_key, f.read(), "application/zip", "export zip")
+
+        _req_ok("POST", f"/api/processor/exports/{export_id}/complete", {
+            "r2Key": export_key,
+            "fileSize": size,
+            "count": len(items),
+        }, what="export complete")
+        print(f"[{export_id}] export complete: {len(items)} item(s), {size} bytes", flush=True)
+    except JobAborted as e:
+        print(f"[{export_id}] export aborted: {e}", flush=True)
+        _req("POST", f"/api/processor/exports/{export_id}/fail", {"message": str(e)})
+    except Exception as e:
+        print(f"[{export_id}] export ERROR: {e}", flush=True)
+        _req("POST", f"/api/processor/exports/{export_id}/fail", {"message": str(e)})
+    finally:
+        if tmpdir:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def main():
+    once = "--once" in sys.argv
+    print(f"FrameForge local runner — worker={BASE} poll={POLL_INTERVAL}s once={once}", flush=True)
+    while True:
+        try:
+            jobs = get_queue()
+            if jobs:
+                print(f"queue: {len(jobs)} frame-job(s) -> {jobs}", flush=True)
+            for jid in jobs:
+                process_job(jid)
+
+            chunk_jobs = get_chunk_queue()
+            if chunk_jobs:
+                print(f"chunk queue: {len(chunk_jobs)} job(s) -> {chunk_jobs}", flush=True)
+            for jid in chunk_jobs:
+                process_chunks(jid)
+
+            exports = get_export_queue()
+            if exports:
+                print(f"export queue: {len(exports)} export(s) -> {exports}", flush=True)
+            for eid in exports:
+                process_export(eid)
+        except Exception as e:
+            print(f"poll error: {e}", flush=True)
+        if once:
+            return
+        time.sleep(POLL_INTERVAL)
+
+
+if __name__ == "__main__":
+    main()

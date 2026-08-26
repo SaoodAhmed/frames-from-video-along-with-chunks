@@ -1,0 +1,56 @@
+name: process
+
+# 24/7 video processing on GitHub's free runners. The Cloudflare Worker fires a
+# `repository_dispatch` whenever a frame/chunk/export job is queued; this
+# workflow runs the same Python/OpenCV runner that used to run only on the
+# laptop, so processing continues even when the laptop is off.
+#
+# The runner runs in --once mode: it drains the entire Worker queue (frames,
+# chunks and exports) and exits. `concurrency` serialises runs so two dispatches
+# can never process the same job at once (D1's queued->processing claim is the
+# final guard anyway).
+
+on:
+  repository_dispatch:
+    types: [process]
+  workflow_dispatch: # manual "Run workflow" button for testing
+
+concurrency:
+  group: process
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Check out processor
+        uses: actions/checkout@v4
+
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r processor/requirements.txt
+
+      - name: Drain processing queue
+        env:
+          WORKER_BASE_URL: https://frameforge.ahmedsauddd128.workers.dev
+          PROCESSOR_TOKEN: ${{ secrets.PROCESSOR_TOKEN }}
+          PROCESSOR_R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          PROCESSOR_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          PROCESSOR_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          PROCESSOR_R2_BUCKET: ${{ secrets.R2_BUCKET_NAME }}
+          PROCESSOR_R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          PROCESSOR_D1_ACCOUNT_ID: unused
+          PROCESSOR_D1_DATABASE_ID: unused
+          PROCESSOR_D1_API_TOKEN: unused
+        run: python processor/local_runner.py --once

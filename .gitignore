@@ -1,0 +1,43 @@
+# Secrets — NEVER commit
+.env
+.dev.vars
+*.pem
+*.key
+.mcp.json
+
+# API deploy artifacts (worker bundle, asset JWTs, admin bootstrap password)
+.deploy-tmp/
+
+# Dependencies
+node_modules/
+
+# Wrangler / Cloudflare local state
+.wrangler/
+.dev.vars.local
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Local machine artifacts / big files / credentials
+.claude/
+login_credentials.txt
+*.zip
+*.mp4
