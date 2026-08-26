@@ -58,7 +58,10 @@ async function notifyProcessors(
   payload: DispatchPayload
 ): Promise<void> {
   await triggerProcessor(c.env, payload);
-  const waitUntil = c.executionCtx?.waitUntil ?? ((p: Promise<unknown>) => void p);
+  // waitUntil must be called as a method of the ExecutionContext, otherwise
+  // Workers throws "Illegal invocation" — bind it before handing it off.
+  const exec = c.executionCtx;
+  const waitUntil = exec?.waitUntil ? exec.waitUntil.bind(exec) : ((p: Promise<unknown>) => void p);
   await triggerGitHubDispatch(c.env, { waitUntil }, payload);
 }
 
@@ -140,7 +143,8 @@ jobs.post("/:id/process", requireAdmin, async (c) => {
   return c.json({ job: updated });
 });
 
-// POST /:id/cancel — admin cancels a queued/processing job
+// POST /:id/cancel — admin cancels active frame processing (job.status) OR
+// active chunk splitting (the independent chunk_status column).
 jobs.post("/:id/cancel", requireAdmin, async (c) => {
   const jobId = c.req.param("id");
   const job = await getJob(c.env.DB, jobId);
@@ -149,7 +153,11 @@ jobs.post("/:id/cancel", requireAdmin, async (c) => {
   let ok = await transitionJob(c.env.DB, jobId, "queued", "cancelled");
   if (!ok) ok = await transitionJob(c.env.DB, jobId, "processing", "cancelled");
   if (!ok) {
-    return c.json({ error: `Cannot cancel a job in status '${job.status}'` }, 409);
+    ok = await transitionChunk(c.env.DB, jobId, "queued", "cancelled");
+    if (!ok) ok = await transitionChunk(c.env.DB, jobId, "processing", "cancelled");
+  }
+  if (!ok) {
+    return c.json({ error: `Cannot cancel job (status '${job.status}', chunks '${job.chunk_status}')` }, 409);
   }
   return c.json({ ok: true, job: await getJob(c.env.DB, jobId) });
 });

@@ -225,13 +225,15 @@
 
     // Chunk status badge
     const csb = $("chunk-status-badge");
-    csb.className = "badge " + (j.chunk_status === "completed" ? "completed" : j.chunk_status === "failed" ? "failed" : j.chunk_status === "processing" || j.chunk_status === "queued" ? "queued" : "cancelled");
-    csb.textContent = j.chunk_status === "none" ? "Not split" : "Chunks: " + API.statusLabel(j.chunk_status);
+    const cs = j.chunk_status;
+    csb.className = "badge " + (cs === "completed" ? "completed" : cs === "failed" ? "failed" : cs === "cancelled" ? "cancelled" : ["queued", "processing"].includes(cs) ? "queued" : "");
+    csb.textContent = cs === "none" ? "Not split" : "Chunks: " + API.statusLabel(cs);
 
     // Actions
     const actions = $("job-actions");
     actions.innerHTML = "";
-    if (j.status === "queued" || j.status === "processing") {
+    // Cancel is available while frame extraction OR chunk splitting is active.
+    if (["queued", "processing"].includes(j.status) || ["queued", "processing"].includes(j.chunk_status)) {
       addBtn(actions, "Cancel", "danger", cancelJob);
     }
     if (j.status === "failed" || j.status === "cancelled") {
@@ -260,7 +262,7 @@
       state.framesPage = 1;
       loadFrames();
     }
-    if (["completed", "failed"].includes(j.chunk_status) || ["queued", "processing"].includes(j.chunk_status)) {
+    if (["completed", "failed", "cancelled"].includes(j.chunk_status) || ["queued", "processing"].includes(j.chunk_status)) {
       state.chunksPage = 1;
       loadChunks();
     } else {
@@ -366,7 +368,7 @@
         state.job = data.job;
         updateProgress(data.job);
         if (prevStatus !== data.job.status || prevChunk !== data.job.chunk_status) renderJob();
-        const done = TERMINAL.includes(data.job.status) && ["none", "completed", "failed"].includes(data.job.chunk_status);
+        const done = TERMINAL.includes(data.job.status) && ["none", "completed", "failed", "cancelled"].includes(data.job.chunk_status);
         if (done) stopJobTimer();
       } catch (err) { /* keep polling */ }
     }, 4000);

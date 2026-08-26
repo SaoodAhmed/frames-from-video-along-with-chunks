@@ -9,7 +9,7 @@ export type JobStatus =
   | "cancelled";
 
 /** Independent chunk-splitting state (job.status stays 'completed'). */
-export type ChunkStatus = "none" | "queued" | "processing" | "completed" | "failed";
+export type ChunkStatus = "none" | "queued" | "processing" | "completed" | "failed" | "cancelled";
 
 /** What an export ZIP bundles: extracted frames or scene-based chunk videos. */
 export type ExportKind = "frames" | "chunks";
@@ -106,10 +106,11 @@ export const r2Keys = {
 // Chunk state machine — allowed transitions
 export const CHUNK_TRANSITIONS: Record<ChunkStatus, ChunkStatus[]> = {
   none: ["queued"],
-  queued: ["processing", "failed"],
-  processing: ["completed", "failed"],
+  queued: ["processing", "failed", "cancelled"],
+  processing: ["completed", "failed", "cancelled"],
   completed: ["queued"],
   failed: ["queued"],
+  cancelled: ["queued"],
 };
 
 export function canTransitionChunk(from: ChunkStatus, to: ChunkStatus): boolean {

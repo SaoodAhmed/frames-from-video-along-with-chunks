@@ -11,6 +11,12 @@ import processorRoutes from "./routes/processor";
 
 const app = new Hono<{ Bindings: Env }>();
 
+// Log unexpected errors for debugging; don't leak internals to clients.
+app.onError((err, c) => {
+  console.error("Hono onError:", err?.stack ?? err?.message ?? err);
+  return c.json({ error: "Internal server error" }, 500);
+});
+
 app.use(
   "*",
   cors({
