@@ -247,7 +247,8 @@
     }
 
     // Panels visibility
-    $("process-panel").classList.toggle("hidden", !["uploaded", "failed", "cancelled"].includes(j.status));
+    // Start-processing is hidden while a chunk split is active (mutual exclusion).
+    $("process-panel").classList.toggle("hidden", !["uploaded", "failed", "cancelled"].includes(j.status) || ["queued", "processing"].includes(j.chunk_status));
     const frameActive = ["queued", "processing"].includes(j.status);
     const chunkActive = ["queued", "processing"].includes(j.chunk_status);
     $("progress-panel").classList.toggle("hidden", !(frameActive || chunkActive));
@@ -495,6 +496,13 @@
 
   async function splitChunks() {
     if (!state.job) return;
+    const j = state.job;
+    if (["queued", "processing"].includes(j.status) || ["queued", "processing"].includes(j.chunk_status)) {
+      $("job-err").textContent = ["queued", "processing"].includes(j.chunk_status)
+        ? `Chunks are already ${j.chunk_status}.`
+        : "Wait for frame processing to finish before splitting into chunks.";
+      return;
+    }
     if (!confirm("Split this video into chunks by background change? Existing chunks will be replaced.")) return;
     $("job-err").textContent = "";
     try {
@@ -524,6 +532,12 @@
   function renderChunkGallery() {
     if (!state.chunks) return;
     $("chunks-empty").classList.toggle("hidden", state.chunks.length > 0);
+    // Hide the empty-state "Split" CTA while frame extraction or a chunk split is active.
+    const j = state.job;
+    if (j) {
+      const canSplit = !["queued", "processing"].includes(j.status) && !["queued", "processing"].includes(j.chunk_status);
+      $("empty-split").classList.toggle("hidden", !canSplit);
+    }
     $("chunks-gallery").innerHTML = "";
     $("chunk-sel-count").textContent = `${state.selectedChunks.size} selected`;
     for (const c of state.chunks) {

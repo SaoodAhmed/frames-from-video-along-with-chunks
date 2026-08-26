@@ -91,6 +91,10 @@ jobs.post("/:id/process", requireAdmin, async (c) => {
   if (!["uploaded", "failed", "cancelled"].includes(job.status)) {
     return c.json({ error: `Cannot process a job in status '${job.status}'` }, 409);
   }
+  // Mutual exclusion: don't queue frame extraction while a chunk split is active.
+  if (job.chunk_status === "queued" || job.chunk_status === "processing") {
+    return c.json({ error: `Cannot process frames while chunks are ${job.chunk_status}` }, 409);
+  }
 
   // Resolve extraction mode + fps from the preset name (mirrors desktop app).
   const presetName = typeof body.mode === "string" ? body.mode : "1 fps";
@@ -315,11 +319,13 @@ jobs.post("/:id/chunk", requireAdmin, async (c) => {
   const job = await getJob(c.env.DB, jobId);
   if (!job) return c.json({ error: "Not found" }, 404);
 
-  if (["queued", "processing"].includes(job.status)) {
-    return c.json({ error: `Cannot split a job in status '${job.status}'` }, 409);
-  }
+  // Chunks-active check first: when a job has frames queued AND chunks running,
+  // this is the accurate blocker (and the more actionable message).
   if (job.chunk_status === "queued" || job.chunk_status === "processing") {
     return c.json({ error: `Chunks are already ${job.chunk_status}` }, 409);
+  }
+  if (["queued", "processing"].includes(job.status)) {
+    return c.json({ error: `Cannot split a job in status '${job.status}'` }, 409);
   }
 
   // Re-splitting replaces the previous chunks entirely.
