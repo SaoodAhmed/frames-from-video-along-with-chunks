@@ -252,6 +252,16 @@ h3 { font-size: 14px; text-transform: uppercase; letter-spacing: 1px; color: var
 }
 .progress-bar-label { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-top: 6px; }
 
+/* Batch upload rows */
+.upload-row { padding: 8px 0; border-bottom: 1px solid var(--border); }
+.upload-row:last-child { border-bottom: none; }
+.upload-row-head { display: flex; justify-content: space-between; gap: 10px; font-size: 12px; }
+.upload-row-name { font-family: var(--mono); color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.upload-row-status { font-family: var(--mono); color: var(--muted); flex-shrink: 0; }
+.upload-row .progress { margin-top: 6px; }
+.upload-row.ok .upload-row-status { color: #2e9e5b; }
+.upload-row.err .upload-row-status { color: #e5484d; }
+
 /* ── Tables ───────────────────────────────────────────────── */
 .table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; }

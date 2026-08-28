@@ -10,6 +10,7 @@ import {
   getJobForUser,
   transitionJob,
   transitionChunk,
+  transitionOptimize,
   listChunks,
   listChunkKeys,
   deleteChunkRows,
@@ -73,7 +74,15 @@ jobs.get("/:id", requireAuth, async (c) => {
 
   const host = getR2Host(c.env.R2_ENDPOINT, c.env.R2_BUCKET_NAME);
   const videoUrl = await presignGet(c.env.R2_ACCESS_KEY_ID, c.env.R2_SECRET_ACCESS_KEY, S3_REGION, host, job.r2_video_key, 900);
-  return c.json({ job, videoUrl });
+  const optimizedUrl =
+    job.optimize_status === "completed" && job.optimized_key
+      ? await presignGet(c.env.R2_ACCESS_KEY_ID, c.env.R2_SECRET_ACCESS_KEY, S3_REGION, host, job.optimized_key, 900)
+      : null;
+  const thumbUrl =
+    job.optimize_status === "completed" && job.optimized_thumb_key
+      ? await presignGet(c.env.R2_ACCESS_KEY_ID, c.env.R2_SECRET_ACCESS_KEY, S3_REGION, host, job.optimized_thumb_key, 900)
+      : null;
+  return c.json({ job, videoUrl, optimizedUrl, thumbUrl });
 });
 
 // POST /:id/process — admin starts processing (uploaded/failed/cancelled -> queued)
@@ -148,7 +157,7 @@ jobs.post("/:id/process", requireAdmin, async (c) => {
 });
 
 // POST /:id/cancel — admin cancels active frame processing (job.status) OR
-// active chunk splitting (the independent chunk_status column).
+// active chunk splitting (chunk_status) OR active optimization (optimize_status).
 jobs.post("/:id/cancel", requireAdmin, async (c) => {
   const jobId = c.req.param("id");
   const job = await getJob(c.env.DB, jobId);
@@ -161,7 +170,11 @@ jobs.post("/:id/cancel", requireAdmin, async (c) => {
     if (!ok) ok = await transitionChunk(c.env.DB, jobId, "processing", "cancelled");
   }
   if (!ok) {
-    return c.json({ error: `Cannot cancel job (status '${job.status}', chunks '${job.chunk_status}')` }, 409);
+    ok = await transitionOptimize(c.env.DB, jobId, "queued", "cancelled");
+    if (!ok) ok = await transitionOptimize(c.env.DB, jobId, "processing", "cancelled");
+  }
+  if (!ok) {
+    return c.json({ error: `Cannot cancel job (status '${job.status}', chunks '${job.chunk_status}', optimize '${job.optimize_status}')` }, 409);
   }
   return c.json({ ok: true, job: await getJob(c.env.DB, jobId) });
 });
@@ -344,6 +357,52 @@ jobs.post("/:id/chunk", requireAdmin, async (c) => {
 
   const updated = await getJob(c.env.DB, jobId);
   await notifyProcessors(c, { jobId, action: "chunk" });
+  return c.json({ job: updated });
+});
+
+// POST /:id/optimize — admin triggers optimization (H.264 compress for videos).
+// CRF 23 default; maxDim unset = keep resolution. Re-running replaces the output.
+jobs.post("/:id/optimize", requireAdmin, async (c) => {
+  const jobId = c.req.param("id");
+  const job = await getJob(c.env.DB, jobId);
+  if (!job) return c.json({ error: "Not found" }, 404);
+  if (job.media_type === "image") return c.json({ error: "Images optimize automatically" }, 409);
+
+  let body: Record<string, unknown>;
+  try {
+    body = await c.req.json();
+  } catch {
+    body = {};
+  }
+  const crf = typeof body.crf === "number" && Number.isFinite(body.crf) ? Math.min(45, Math.max(0, Math.round(body.crf))) : 23;
+  const maxDim =
+    typeof body.maxDim === "number" && Number.isFinite(body.maxDim) && body.maxDim > 0
+      ? Math.round(body.maxDim)
+      : null;
+
+  if (job.optimize_status === "queued" || job.optimize_status === "processing") {
+    return c.json({ error: `Optimization is already ${job.optimize_status}` }, 409);
+  }
+
+  // Re-optimizing replaces the previous output entirely.
+  for (const key of [job.optimized_key, job.optimized_thumb_key]) {
+    if (key) await Promise.allSettled([c.env.R2.delete(key)]);
+  }
+
+  const optimizedKey = r2Keys.optimizedVideo(job.user_id, jobId);
+  const ok = await transitionOptimize(c.env.DB, jobId, job.optimize_status, "queued", {
+    opt_crf: crf,
+    opt_max_dim: maxDim,
+    optimized_key: optimizedKey,
+    optimized_size: null,
+    optimized_duration: null,
+    optimized_thumb_key: null,
+    opt_format: null,
+  });
+  if (!ok) return c.json({ error: "Cannot start optimization now" }, 409);
+
+  const updated = await getJob(c.env.DB, jobId);
+  await notifyProcessors(c, { jobId, action: "optimize" });
   return c.json({ job: updated });
 });
 

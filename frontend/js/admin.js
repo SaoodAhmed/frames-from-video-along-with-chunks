@@ -218,6 +218,9 @@
       ["Total frames", j.total_source_frames ? `${j.total_source_frames} source` : "—"],
       ["Extracted", `${j.extracted_frames} frames`],
       ["Chunks", j.chunk_count ? `${j.chunk_count} split` : "—"],
+      ["Optimize", j.optimize_status === "none" ? "—" : j.optimize_status === "completed"
+        ? (j.opt_crf ? `H.264 crf ${j.opt_crf}${j.opt_max_dim ? ` · ≤${j.opt_max_dim}px` : ""}` : "done")
+        : API.statusLabel(j.optimize_status)],
     ];
     if (j.error_message) meta.push(["Error", j.error_message]);
     if (j.chunk_error) meta.push(["Chunk Error", j.chunk_error]);
@@ -229,11 +232,17 @@
     csb.className = "badge " + (cs === "completed" ? "completed" : cs === "failed" ? "failed" : cs === "cancelled" ? "cancelled" : ["queued", "processing"].includes(cs) ? "queued" : "");
     csb.textContent = cs === "none" ? "Not split" : "Chunks: " + API.statusLabel(cs);
 
+    // Optimization status badge (independent of frame/chunk status)
+    const osb = $("optimize-status-badge");
+    const os = j.optimize_status;
+    osb.className = "badge " + (os === "completed" ? "completed" : os === "failed" ? "failed" : os === "cancelled" ? "cancelled" : ["queued", "processing"].includes(os) ? "queued" : "");
+    osb.textContent = os === "none" ? "" : os === "completed" ? "Optimized" : "Opt: " + API.statusLabel(os);
+
     // Actions
     const actions = $("job-actions");
     actions.innerHTML = "";
-    // Cancel is available while frame extraction OR chunk splitting is active.
-    if (["queued", "processing"].includes(j.status) || ["queued", "processing"].includes(j.chunk_status)) {
+    // Cancel is available while frame extraction, chunk splitting OR optimization is active.
+    if (["queued", "processing"].includes(j.status) || ["queued", "processing"].includes(j.chunk_status) || ["queued", "processing"].includes(j.optimize_status)) {
       addBtn(actions, "Cancel", "danger", cancelJob);
     }
     if (j.status === "failed" || j.status === "cancelled") {
@@ -244,6 +253,20 @@
     }
     if (!["queued", "processing"].includes(j.status) && !["queued", "processing"].includes(j.chunk_status)) {
       addBtn(actions, "Split into Chunks", "", splitChunks);
+    }
+    // Optimize is a video-only, independent step; hidden while frames/chunks are
+    // actively running and while an optimization is already queued/processing.
+    if (j.media_type !== "image" && !["queued", "processing"].includes(j.status) && !["queued", "processing"].includes(j.chunk_status) && !["queued", "processing"].includes(j.optimize_status)) {
+      addBtn(actions, j.optimize_status === "completed" ? "Re-optimize" : "Optimize", "ghost", optimizeJob);
+    }
+    if (j.optimize_status === "completed" && j.optimizedUrl) {
+      const dl = document.createElement("a");
+      dl.className = "btn small";
+      dl.href = j.optimizedUrl;
+      dl.download = (j.original_filename || "optimized").replace(/\.[^.]+$/, "") + "_optimized.mp4";
+      dl.textContent = "Download Optimized";
+      dl.target = "_blank";
+      actions.appendChild(dl);
     }
 
     // Panels visibility
@@ -366,10 +389,11 @@
         const data = await API.request(`/api/jobs/${state.job.id}`);
         const prevStatus = state.job.status;
         const prevChunk = state.job.chunk_status;
+        const prevOpt = state.job.optimize_status;
         state.job = data.job;
         updateProgress(data.job);
-        if (prevStatus !== data.job.status || prevChunk !== data.job.chunk_status) renderJob();
-        const done = TERMINAL.includes(data.job.status) && ["none", "completed", "failed", "cancelled"].includes(data.job.chunk_status);
+        if (prevStatus !== data.job.status || prevChunk !== data.job.chunk_status || prevOpt !== data.job.optimize_status) renderJob();
+        const done = TERMINAL.includes(data.job.status) && ["none", "completed", "failed", "cancelled"].includes(data.job.chunk_status) && ["none", "completed", "failed", "cancelled"].includes(data.job.optimize_status);
         if (done) stopJobTimer();
       } catch (err) { /* keep polling */ }
     }, 4000);
@@ -379,11 +403,14 @@
   function updateProgress(j) {
     const frameActive = ["queued", "processing"].includes(j.status);
     const chunkActive = ["queued", "processing"].includes(j.chunk_status);
+    const optActive = ["queued", "processing"].includes(j.optimize_status);
 
-    $("progress-status-badge").className = "badge " + (chunkActive ? j.chunk_status : j.status);
+    $("progress-status-badge").className = "badge " + (chunkActive ? j.chunk_status : optActive ? j.optimize_status : j.status);
     $("progress-status-badge").textContent = chunkActive
       ? "Chunks: " + API.statusLabel(j.chunk_status)
-      : API.statusLabel(j.status);
+      : optActive
+        ? "Optimizing: " + API.statusLabel(j.optimize_status)
+        : API.statusLabel(j.status);
 
     const fwrap = $("progress-bar").parentElement;
     fwrap.style.display = frameActive ? "block" : "none";
@@ -512,6 +539,33 @@
       toast("Scene split started — chunks will appear as they process.");
     } catch (err) {
       $("job-err").textContent = "Failed to start chunk split: " + err.message;
+    }
+  }
+
+  async function optimizeJob() {
+    if (!state.job) return;
+    const j = state.job;
+    if (["queued", "processing"].includes(j.status) || ["queued", "processing"].includes(j.chunk_status)) {
+      $("job-err").textContent = "Wait for frame extraction / chunk splitting to finish before optimizing.";
+      return;
+    }
+    const maxDimRaw = prompt("Max width for the optimized video (0 = keep original resolution):", "0");
+    if (maxDimRaw === null) return;
+    const crfRaw = prompt("CRF quality (0-45, lower = better quality / larger file, default 23):", "23");
+    if (crfRaw === null) return;
+    const crf = parseInt(crfRaw, 10);
+    if (!Number.isFinite(crf) || crf < 0 || crf > 45) { $("job-err").textContent = "CRF must be between 0 and 45."; return; }
+    const maxDim = parseInt(maxDimRaw, 10);
+    const body = { crf };
+    if (Number.isFinite(maxDim) && maxDim > 0) body.maxDim = maxDim;
+    $("job-err").textContent = "";
+    try {
+      const data = await API.request(`/api/jobs/${state.job.id}/optimize`, { method: "POST", body });
+      state.job = data.job;
+      renderJob();
+      toast("Optimization started — H.264 transcode will run on the processor.");
+    } catch (err) {
+      $("job-err").textContent = "Failed to start optimization: " + err.message;
     }
   }
 

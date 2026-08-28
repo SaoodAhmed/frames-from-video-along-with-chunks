@@ -6,6 +6,7 @@ import {
   getJob,
   transitionJob,
   transitionChunk,
+  transitionOptimize,
   insertChunk,
   listChunkKeys,
 } from "../db/jobs";
@@ -336,6 +337,91 @@ processor.post("/chunk/fail/:jobId", async (c) => {
   const message = typeof body.message === "string" ? body.message.slice(0, 2000) : "chunk split failed";
   await c.env.DB.prepare(
     "UPDATE jobs SET chunk_status = 'failed', chunk_error = ?, updated_at = ? WHERE id = ? AND chunk_status IN ('processing','queued')"
+  )
+    .bind(message, new Date().toISOString(), jobId)
+    .run();
+  return c.json({ ok: true });
+});
+
+// ── Optimization (H.264 video compress / image WebP-JPEG) ───────────────────
+
+// GET /queue/optimize — ids of jobs waiting to be optimized
+processor.get("/queue/optimize", async (c) => {
+  if (!authorize(c)) return c.json({ error: "Unauthorized" }, 401);
+  const rows = await c.env.DB
+    .prepare("SELECT id FROM jobs WHERE optimize_status = 'queued'")
+    .all<{ id: string }>();
+  return c.json({ jobs: (rows.results ?? []).map((r) => r.id) });
+});
+
+// POST /optimize/claim/:jobId — optimize_status queued -> processing (guarded)
+processor.post("/optimize/claim/:jobId", async (c) => {
+  if (!authorize(c)) return c.json({ error: "Unauthorized" }, 401);
+  const jobId = c.req.param("jobId");
+  const ok = await transitionOptimize(c.env.DB, jobId, "queued", "processing");
+  if (!ok) return c.json({ error: "Optimize job not claimable" }, 409);
+  const job = await getJob(c.env.DB, jobId);
+  return c.json({ job });
+});
+
+// POST /optimize/:jobId/meta — heartbeat + output metadata. Refreshes
+// updated_at (the stale-claim signal) and stores size/duration when provided.
+// Returns 409 when optimize_status is not 'processing' — this is the abort
+// mechanism for /cancel: the runner stops and does not call complete/fail.
+processor.post("/optimize/:jobId/meta", async (c) => {
+  if (!authorize(c)) return c.json({ error: "Unauthorized" }, 401);
+  const jobId = c.req.param("jobId");
+  let body: { size?: number; duration?: number };
+  try {
+    body = await c.req.json();
+  } catch {
+    body = {};
+  }
+  const res = await c.env.DB.prepare(
+    "UPDATE jobs SET optimized_size = COALESCE(?, optimized_size), optimized_duration = COALESCE(?, optimized_duration), updated_at = ? WHERE id = ? AND optimize_status = 'processing'"
+  )
+    .bind(
+      typeof body.size === "number" ? body.size : null,
+      typeof body.duration === "number" ? body.duration : null,
+      new Date().toISOString(),
+      jobId
+    )
+    .run();
+  if (res.meta.changes === 0) return c.json({ error: "Optimization was cancelled" }, 409);
+  return c.json({ ok: true });
+});
+
+// POST /optimize/complete/:jobId — optimize_status processing -> completed
+processor.post("/optimize/complete/:jobId", async (c) => {
+  if (!authorize(c)) return c.json({ error: "Unauthorized" }, 401);
+  const jobId = c.req.param("jobId");
+  let body: { size?: number; duration?: number };
+  try {
+    body = await c.req.json();
+  } catch {
+    body = {};
+  }
+  const ok = await transitionOptimize(c.env.DB, jobId, "processing", "completed", {
+    optimized_size: typeof body.size === "number" ? body.size : null,
+    optimized_duration: typeof body.duration === "number" ? body.duration : null,
+  });
+  if (!ok) return c.json({ error: "Optimization not completable" }, 409);
+  return c.json({ ok: true });
+});
+
+// POST /optimize/fail/:jobId — mark optimization as failed with a message
+processor.post("/optimize/fail/:jobId", async (c) => {
+  if (!authorize(c)) return c.json({ error: "Unauthorized" }, 401);
+  const jobId = c.req.param("jobId");
+  let body: { message?: string };
+  try {
+    body = await c.req.json();
+  } catch {
+    body = {};
+  }
+  const message = typeof body.message === "string" ? body.message.slice(0, 2000) : "optimization failed";
+  await c.env.DB.prepare(
+    "UPDATE jobs SET optimize_status = 'failed', error_message = ?, updated_at = ? WHERE id = ? AND optimize_status IN ('processing','queued')"
   )
     .bind(message, new Date().toISOString(), jobId)
     .run();

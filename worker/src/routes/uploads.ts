@@ -14,7 +14,23 @@ const uploads = new Hono<{ Bindings: Env; Variables: { user: JwtUser } }>();
 const CHUNK_SIZE = 50 * 1024 * 1024;
 const PART_TTL_SEC = 15 * 60; // presigned URLs valid 15 minutes
 const MAX_PARTS = 10000;
-const ALLOWED_MIME = /^video\/(mp4|quicktime|x-msvideo|x-matroska|webm|ogg)$/;
+
+// Any container ffmpeg can decode. Accept by MIME (video/*) OR by extension as a
+// fallback, because some containers (e.g. .mxf, .ts) report a non-video MIME or
+// none at all. Actual decodability is verified by the runner with ffprobe.
+const VIDEO_EXTS = new Set([
+  ".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm", ".ogv", ".ogg", ".3gp",
+  ".3g2", ".flv", ".wmv", ".mpg", ".mpeg", ".ts", ".m2ts", ".mts", ".mxf",
+  ".mp2", ".ogm", ".divx", ".asf", ".vob", ".m2v", ".mpe",
+]);
+
+function classifyMedia(filename: string, mimeType: string): "video" | "image" | null {
+  const ext = "." + (filename.split(".").pop() ?? "").toLowerCase();
+  const m = mimeType.toLowerCase();
+  if (m.startsWith("video/") || VIDEO_EXTS.has(ext)) return "video";
+  if (m.startsWith("image/")) return "image";
+  return null;
+}
 
 function sanitizeFilename(raw: string): string {
   // Keep only safe filename characters; never trust client-supplied paths.
@@ -43,8 +59,14 @@ uploads.post("/create", requireAuth, async (c) => {
   if (size > maxSize) {
     return c.json({ error: `File exceeds maximum upload size (${Math.floor(maxSize / 1e6)} MB)` }, 413);
   }
-  if (mimeType && !ALLOWED_MIME.test(mimeType)) {
-    return c.json({ error: "Unsupported video type" }, 415);
+  const mediaType = classifyMedia(rawFilename, mimeType);
+  if (mediaType === null) {
+    return c.json({ error: "Unsupported media type (expected a video or image)" }, 415);
+  }
+  // Phase 1 ships video optimization; images are accepted by the API but the
+  // image optimizer lands in Phase 2 — reject images for now with a clear error.
+  if (mediaType === "image") {
+    return c.json({ error: "Image upload is not available yet" }, 415);
   }
 
   const filename = sanitizeFilename(rawFilename);
@@ -59,6 +81,7 @@ uploads.post("/create", requireAuth, async (c) => {
     r2_video_key: r2Key,
     file_size: size,
     mime_type: mimeType || "video/mp4",
+    media_type: "video",
   });
 
   // Initiate multipart upload on R2.

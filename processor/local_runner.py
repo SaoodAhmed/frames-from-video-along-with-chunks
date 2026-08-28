@@ -181,6 +181,15 @@ def _run_ffmpeg(args, timeout=600):
         raise RuntimeError(r.stderr.decode(errors="replace")[-400:])
 
 
+def _optimize_filter(maxdim):
+    """scale filter for optimization: cap width at maxdim (height follows aspect),
+    both rounded to even for yuv420p; without maxdim just force even dimensions so
+    odd-sized sources still encode."""
+    if maxdim:
+        return f"scale='min({maxdim},iw)':-2"
+    return "scale=trunc(iw/2)*2:trunc(ih/2)*2"
+
+
 def get_queue():
     _, data = _req("GET", "/api/processor/queue")
     return data.get("jobs") or []
@@ -194,6 +203,11 @@ def get_chunk_queue():
 def get_export_queue():
     _, data = _req("GET", "/api/processor/exports/queue")
     return data.get("exports") or []
+
+
+def get_optimize_queue():
+    _, data = _req("GET", "/api/processor/queue/optimize")
+    return data.get("jobs") or []
 
 
 def process_job(job_id):
@@ -383,6 +397,94 @@ def process_chunks(job_id):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def process_optimize(job_id):
+    """H.264 transcode (CRF + optional max resolution) -> direct R2 upload.
+
+    The abort check is the meta call right after the transcode: if the admin
+    cancelled the job the meta returns 409 and we stop before uploading anything.
+    """
+    print(f"[{job_id}] optimize claim", flush=True)
+    status, data = _req("POST", f"/api/processor/optimize/claim/{job_id}")
+    if status != 200:
+        print(f"[{job_id}] optimize claim failed {status}: {data}", flush=True)
+        return
+    job = data.get("job") or {}
+    optimized_key = job.get("optimized_key")
+    crf = int(job.get("opt_crf") or 23)
+    maxdim = job.get("opt_max_dim")
+    if maxdim:
+        maxdim = int(maxdim)
+
+    local = None
+    out_path = None
+    try:
+        if not optimized_key:
+            raise RuntimeError("no optimized_key set on job")
+        print(f"[{job_id}] fetching video URL for optimize", flush=True)
+        _, vdata = _req("GET", f"/api/processor/video/{job_id}")
+        url = vdata.get("url")
+        if not url:
+            raise RuntimeError("no video URL returned")
+
+        safe = "".join(c for c in (job.get("original_filename") or "video.mp4") if c.isalnum() or c in "._-") or "video.mp4"
+        local = os.path.join(tempfile.gettempdir(), f"frameforge_opt_in_{job_id}_{safe}")
+        out_path = os.path.join(tempfile.gettempdir(), f"frameforge_opt_out_{job_id}.mp4")
+        print(f"[{job_id}] downloading to {local}", flush=True)
+        with requests.get(url, stream=True, timeout=600) as resp:
+            resp.raise_for_status()
+            with open(local, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=1 << 20):
+                    if chunk:
+                        f.write(chunk)
+
+        print(f"[{job_id}] transcoding (crf={crf}, maxdim={maxdim or 'none'})", flush=True)
+        _run_ffmpeg([
+            "-i", local,
+            "-c:v", "libx264",
+            "-crf", str(crf),
+            "-preset", "medium",
+            "-vf", _optimize_filter(maxdim),
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            out_path,
+        ], timeout=1800)
+
+        size = os.path.getsize(out_path)
+        if size == 0:
+            raise RuntimeError("ffmpeg produced empty output")
+
+        cap = cv2.VideoCapture(out_path)
+        out_fps = cap.get(cv2.CAP_PROP_FPS) or 0
+        out_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+        duration = (out_total / out_fps) if out_fps and out_total else 0.0
+
+        # Abort check + metadata heartbeat (409 here -> cancelled, stop cleanly).
+        _req_ok("POST", f"/api/processor/optimize/{job_id}/meta",
+                {"size": size, "duration": duration}, what="optimize meta")
+
+        with open(out_path, "rb") as f:
+            _put_r2_retry(optimized_key, f.read(), "video/mp4", "optimized video")
+
+        _req_ok("POST", f"/api/processor/optimize/complete/{job_id}",
+                {"size": size, "duration": duration}, what="optimize complete")
+        print(f"[{job_id}] optimize complete: {size} bytes", flush=True)
+    except JobAborted as e:
+        print(f"[{job_id}] optimize aborted: {e}", flush=True)
+    except Exception as e:
+        print(f"[{job_id}] optimize ERROR: {e}", flush=True)
+        _req("POST", f"/api/processor/optimize/fail/{job_id}", {"message": str(e)})
+    finally:
+        for p in (local, out_path):
+            if p and os.path.exists(p):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+
+
 def process_export(export_id):
     """Build a ZIP of frames/chunks from R2 and upload it back to R2."""
     print(f"[{export_id}] export claim", flush=True)
@@ -455,6 +557,12 @@ def main():
                 print(f"export queue: {len(exports)} export(s) -> {exports}", flush=True)
             for eid in exports:
                 process_export(eid)
+
+            optimize_jobs = get_optimize_queue()
+            if optimize_jobs:
+                print(f"optimize queue: {len(optimize_jobs)} job(s) -> {optimize_jobs}", flush=True)
+            for jid in optimize_jobs:
+                process_optimize(jid)
         except Exception as e:
             print(f"poll error: {e}", flush=True)
         if once:

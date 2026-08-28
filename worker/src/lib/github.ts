@@ -2,7 +2,7 @@ import type { Env } from "../env";
 
 export interface DispatchPayload {
   jobId: string;
-  action: "process" | "chunk" | "export";
+  action: "process" | "chunk" | "export" | "optimize";
   exportId?: string;
 }
 

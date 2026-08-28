@@ -61,14 +61,11 @@
       <!-- Upload panel -->
       <div id="upload-panel" class="card hidden mb-20">
         <div id="dropzone" class="dropzone">
-          <div class="dz-title">Drag &amp; Drop video here</div>
-          <div class="dz-sub">or click to Browse · MP4, MOV, AVI, MKV, WEBM</div>
-          <input id="file-input" type="file" class="hidden" accept="video/*,.mp4,.mov,.avi,.mkv,.webm" />
+          <div class="dz-title">Drag &amp; Drop videos here</div>
+          <div class="dz-sub">or click to Browse · any video format, multiple files</div>
+          <input id="file-input" type="file" class="hidden" multiple accept="video/*,.mp4,.mov,.m4v,.avi,.mkv,.webm,.ogv,.ogg,.3gp,.3g2,.flv,.wmv,.mpg,.mpeg,.ts,.m2ts,.mts,.mxf,.mp2,.ogm,.divx,.asf,.vob,.m2v,.mpe" />
         </div>
-        <div id="upload-progress-wrap" class="hidden mt-12">
-          <div class="progress"><span id="upload-progress-bar"></span></div>
-          <div class="progress-bar-label" id="upload-progress-label"></div>
-        </div>
+        <div id="upload-batch" class="hidden mt-12"></div>
         <div class="auth-err" id="upload-err"></div>
       </div>
 

@@ -11,8 +11,13 @@ export type JobStatus =
 /** Independent chunk-splitting state (job.status stays 'completed'). */
 export type ChunkStatus = "none" | "queued" | "processing" | "completed" | "failed" | "cancelled";
 
+/** Independent optimization state (H.264 compress for videos / resize+WebP-JPEG for images). */
+export type OptimizeStatus = "none" | "queued" | "processing" | "completed" | "failed" | "cancelled";
+
 /** What an export ZIP bundles: extracted frames or scene-based chunk videos. */
 export type ExportKind = "frames" | "chunks";
+
+export type MediaType = "video" | "image";
 
 export interface User {
   id: string;
@@ -29,6 +34,7 @@ export interface Job {
   r2_video_key: string;
   file_size: number;
   mime_type: string;
+  media_type: MediaType;
   status: JobStatus;
   source_fps: number | null;
   duration: number | null;
@@ -47,6 +53,14 @@ export interface Job {
   chunk_processed: number;
   chunk_total: number;
   chunk_error: string | null;
+  optimize_status: OptimizeStatus;
+  opt_crf: number | null;
+  opt_max_dim: number | null;
+  optimized_key: string | null;
+  optimized_size: number | null;
+  optimized_duration: number | null;
+  optimized_thumb_key: string | null;
+  opt_format: string | null;
   created_at: string;
   updated_at: string;
   completed_at: string | null;
@@ -91,6 +105,14 @@ export interface JwtUser {
 export const r2Keys = {
   originalVideo: (userId: string, jobId: string, filename: string) =>
     `users/${userId}/videos/${jobId}/original/${filename}`,
+  optimizedVideo: (userId: string, jobId: string) =>
+    `users/${userId}/videos/${jobId}/optimized/optimized.mp4`,
+  originalImage: (userId: string, jobId: string, filename: string) =>
+    `users/${userId}/images/${jobId}/original/${filename}`,
+  optimizedImage: (userId: string, jobId: string) =>
+    `users/${userId}/images/${jobId}/optimized/optimized.webp`,
+  thumbImage: (userId: string, jobId: string) =>
+    `users/${userId}/images/${jobId}/thumb.jpg`,
   fullFrame: (userId: string, jobId: string, n: number) =>
     `users/${userId}/jobs/${jobId}/frames/full/frame_${String(n).padStart(4, "0")}.jpg`,
   thumbFrame: (userId: string, jobId: string, n: number) =>
@@ -115,6 +137,20 @@ export const CHUNK_TRANSITIONS: Record<ChunkStatus, ChunkStatus[]> = {
 
 export function canTransitionChunk(from: ChunkStatus, to: ChunkStatus): boolean {
   return CHUNK_TRANSITIONS[from]?.includes(to) ?? false;
+}
+
+// Optimization state machine — allowed transitions
+export const OPTIMIZE_TRANSITIONS: Record<OptimizeStatus, OptimizeStatus[]> = {
+  none: ["queued"],
+  queued: ["processing", "failed", "cancelled"],
+  processing: ["completed", "failed", "cancelled"],
+  completed: ["queued"],
+  failed: ["queued"],
+  cancelled: ["queued"],
+};
+
+export function canTransitionOptimize(from: OptimizeStatus, to: OptimizeStatus): boolean {
+  return OPTIMIZE_TRANSITIONS[from]?.includes(to) ?? false;
 }
 
 // Status state machine — allowed transitions

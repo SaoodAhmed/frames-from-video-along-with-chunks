@@ -5,7 +5,6 @@
 
   const TERMINAL = ["completed", "failed", "cancelled"];
   let polling = false;
-  let selectedFile = null;
 
   const viewAuth = $("view-auth");
   const viewApp = $("view-app");
@@ -78,35 +77,60 @@
   dropzone.addEventListener("drop", (e) => {
     e.preventDefault();
     dropzone.classList.remove("dragover");
-    if (e.dataTransfer.files.length) startUpload(e.dataTransfer.files[0]);
+    if (e.dataTransfer.files.length) startUpload([...e.dataTransfer.files]);
   });
   fileInput.addEventListener("change", () => {
-    if (fileInput.files.length) startUpload(fileInput.files[0]);
+    if (fileInput.files.length) startUpload([...fileInput.files]);
   });
 
   $("btn-upload").addEventListener("click", () => $("upload-panel").classList.toggle("hidden"));
 
-  async function startUpload(file) {
-    selectedFile = file;
+  // Each file gets its own row (name + progress bar + status). One bad file
+  // fails on its own row without aborting the rest of the batch.
+  async function startUpload(files) {
     $("upload-panel").classList.remove("hidden");
-    $("upload-progress-wrap").classList.remove("hidden");
+    const wrap = $("upload-batch");
+    wrap.classList.remove("hidden");
+    wrap.innerHTML = "";
     $("upload-err").textContent = "";
-    $("upload-progress-bar").style.width = "0%";
-    $("upload-progress-label").textContent = `Uploading ${file.name} (${API.fmtBytes(file.size)})… 0%`;
+    let ok = 0;
 
-    try {
-      await API.uploadVideo(file, (pct) => {
-        const p = Math.round(pct * 100);
-        $("upload-progress-bar").style.width = p + "%";
-        $("upload-progress-label").textContent = `Uploading ${file.name} — ${p}%`;
-      });
-      $("upload-progress-label").textContent = "Upload complete — video is waiting for processing.";
-      fileInput.value = "";
-      await loadVideos();
-      toast("Upload complete — your video is queued.");
-    } catch (err) {
-      $("upload-err").textContent = "Upload failed: " + err.message;
+    await Promise.all(files.map(async (file) => {
+      const row = document.createElement("div");
+      row.className = "upload-row";
+      row.innerHTML = `
+        <div class="upload-row-head">
+          <span class="upload-row-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</span>
+          <span class="upload-row-status">0%</span>
+        </div>
+        <div class="progress"><span></span></div>`;
+      wrap.appendChild(row);
+      const bar = row.querySelector(".progress > span");
+      const status = row.querySelector(".upload-row-status");
+      const setPct = (p) => {
+        bar.style.width = p + "%";
+        status.textContent = p + "%";
+      };
+
+      try {
+        await API.uploadVideo(file, (pct) => setPct(Math.round(pct * 100)));
+        setPct(100);
+        status.textContent = "queued";
+        row.classList.add("ok");
+        ok++;
+      } catch (err) {
+        status.textContent = "failed: " + err.message;
+        row.classList.add("err");
+      }
+    }));
+
+    fileInput.value = "";
+    if (ok) {
+      toast(ok === files.length ? `Uploaded ${ok} video${ok === 1 ? "" : "s"} — queued for processing.` : `${ok}/${files.length} uploaded, rest failed.`, ok === files.length ? "ok" : "err");
+    } else {
+      toast("Upload failed.", "err");
     }
+    await loadVideos();
   }
 
   function toast(msg, type = "ok") {

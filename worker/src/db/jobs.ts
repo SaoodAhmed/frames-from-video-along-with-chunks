@@ -1,12 +1,13 @@
 import type { D1Database } from "@cloudflare/workers-types";
-import { canTransition, canTransitionChunk } from "../types";
-import type { Job, JobStatus, Chunk, ChunkStatus } from "../types";
+import { canTransition, canTransitionChunk, canTransitionOptimize } from "../types";
+import type { Job, JobStatus, Chunk, ChunkStatus, OptimizeStatus } from "../types";
 
 const JOB_FIELDS = `id, user_id, original_filename, r2_video_key, file_size, mime_type,
-  status, source_fps, duration, width, height, total_source_frames, extraction_fps,
+  media_type, status, source_fps, duration, width, height, total_source_frames, extraction_fps,
   extraction_mode, sharpness, scene_threshold, extracted_frames, processed_frames,
   error_message, chunk_status, chunk_count, chunk_processed, chunk_total, chunk_error,
-  created_at, updated_at, completed_at`;
+  optimize_status, opt_crf, opt_max_dim, optimized_key, optimized_size, optimized_duration,
+  optimized_thumb_key, opt_format, created_at, updated_at, completed_at`;
 
 const CHUNK_FIELDS = `id, job_id, chunk_number, start_sec, end_sec, duration, r2_key,
   file_size, width, height, source_fps, deleted, created_at`;
@@ -40,14 +41,16 @@ export async function createJob(
     r2_video_key: string;
     file_size: number;
     mime_type: string;
+    media_type?: "video" | "image";
+    optimize_status?: OptimizeStatus;
   }
 ): Promise<void> {
   const now = new Date().toISOString();
   await db
     .prepare(
       `INSERT INTO jobs (id, user_id, original_filename, r2_video_key, file_size,
-        mime_type, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'uploaded', ?, ?)`
+        mime_type, media_type, optimize_status, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'uploaded', ?, ?)`
     )
     .bind(
       input.id,
@@ -56,6 +59,8 @@ export async function createJob(
       input.r2_video_key,
       input.file_size,
       input.mime_type,
+      input.media_type ?? "video",
+      input.optimize_status ?? "none",
       now,
       now
     )
@@ -225,6 +230,35 @@ export async function transitionChunk(
   vals.push(jobId, from);
   const res = await db
     .prepare(`UPDATE jobs SET ${sets.join(", ")} WHERE id = ? AND chunk_status = ?`)
+    .bind(...vals)
+    .run();
+  return res.meta.changes > 0;
+}
+
+/**
+ * Atomic optimize-status transition. Mirrors transitionChunk but operates on the
+ * job's independent optimize_status column.
+ */
+export async function transitionOptimize(
+  db: D1Database,
+  jobId: string,
+  from: OptimizeStatus,
+  to: OptimizeStatus,
+  extra?: Record<string, string | number | null>
+): Promise<boolean> {
+  if (!canTransitionOptimize(from, to)) return false;
+  const now = new Date().toISOString();
+  const sets = ["optimize_status = ?", "updated_at = ?"];
+  const vals: unknown[] = [to, now];
+  if (extra) {
+    for (const [k, v] of Object.entries(extra)) {
+      sets.push(`${k} = ?`);
+      vals.push(v);
+    }
+  }
+  vals.push(jobId, from);
+  const res = await db
+    .prepare(`UPDATE jobs SET ${sets.join(", ")} WHERE id = ? AND optimize_status = ?`)
     .bind(...vals)
     .run();
   return res.meta.changes > 0;
