@@ -31,6 +31,7 @@ import boto3
 import cv2
 import requests
 from botocore.config import Config as BotoConfig
+from PIL import Image
 
 # config.py requires the PROCESSOR_* vars at import. Satisfy them from the
 # repo's .env (read-only) so the runner stays self-contained.
@@ -397,8 +398,96 @@ def process_chunks(job_id):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def _smart_resize(img, max_dim):
+    """Aspect-preserving downscale to fit within max_dim (mirrors tikinn-2.py)."""
+    w, h = img.size
+    if max(w, h) <= max_dim:
+        return img
+    ratio = max_dim / max(w, h)
+    return img.resize((max(1, round(w * ratio)), max(1, round(h * ratio))), Image.LANCZOS)
+
+
+def _process_image(job_id, job, optimized_key):
+    """Pillow resize -> WebP/JPEG + JPEG thumb, both written directly to R2.
+
+    Format follows job.opt_format (default webp). Images need no cv2/ffmpeg.
+    """
+    user_id = job.get("user_id") or ""
+    fmt = job.get("opt_format") or "webp"
+    maxdim = job.get("opt_max_dim")
+    if maxdim:
+        maxdim = int(maxdim)
+    thumb_key = job.get("optimized_thumb_key")
+
+    print(f"[{job_id}] fetching image URL for optimize", flush=True)
+    _, vdata = _req("GET", f"/api/processor/video/{job_id}")
+    url = vdata.get("url")
+    if not url:
+        raise RuntimeError("no source URL returned")
+
+    local = None
+    out_path = None
+    thumb_path = None
+    try:
+        local = os.path.join(tempfile.gettempdir(), f"frameforge_img_{job_id}")
+        print(f"[{job_id}] downloading to {local}", flush=True)
+        with requests.get(url, stream=True, timeout=300) as resp:
+            resp.raise_for_status()
+            with open(local, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=1 << 20):
+                    if chunk:
+                        f.write(chunk)
+
+        img = Image.open(local)
+        img.load()
+        if maxdim:
+            img = _smart_resize(img, maxdim)
+        if img.mode not in ("RGB", "RGBA"):
+            img = img.convert("RGBA")
+
+        out_path = os.path.join(tempfile.gettempdir(), f"frameforge_img_out_{job_id}")
+        if fmt == "jpeg":
+            save = img.convert("RGB") if img.mode == "RGBA" else img
+            save.save(out_path, "JPEG", quality=85, progressive=True)
+            ct = "image/jpeg"
+        else:
+            img.save(out_path, "WEBP", quality=80, method=6)
+            ct = "image/webp"
+
+        size = os.path.getsize(out_path)
+        if size == 0:
+            raise RuntimeError("Pillow produced empty output")
+
+        # Abort check + metadata heartbeat (409 here -> cancelled, stop cleanly).
+        _req_ok("POST", f"/api/processor/optimize/{job_id}/meta",
+                {"size": size, "duration": 0}, what="optimize meta")
+
+        with open(out_path, "rb") as f:
+            _put_r2_retry(optimized_key, f.read(), ct, "optimized image")
+
+        if thumb_key:
+            thumb_path = os.path.join(tempfile.gettempdir(), f"frameforge_img_thumb_{job_id}")
+            thumb = img.copy()
+            thumb.thumbnail((400, 400), Image.LANCZOS)
+            thumb = thumb.convert("RGB") if thumb.mode == "RGBA" else thumb
+            thumb.save(thumb_path, "JPEG", quality=75)
+            with open(thumb_path, "rb") as f:
+                _put_r2_retry(thumb_key, f.read(), "image/jpeg", "optimized thumb")
+
+        _req_ok("POST", f"/api/processor/optimize/complete/{job_id}",
+                {"size": size, "duration": 0, "format": fmt}, what="optimize complete")
+        print(f"[{job_id}] image optimize complete: {size} bytes ({fmt})", flush=True)
+    finally:
+        for p in (local, out_path, thumb_path):
+            if p and os.path.exists(p):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+
+
 def process_optimize(job_id):
-    """H.264 transcode (CRF + optional max resolution) -> direct R2 upload.
+    """H.264 transcode (video) or Pillow resize/convert (image) -> direct R2 upload.
 
     The abort check is the meta call right after the transcode: if the admin
     cancelled the job the meta returns 409 and we stop before uploading anything.
@@ -420,6 +509,9 @@ def process_optimize(job_id):
     try:
         if not optimized_key:
             raise RuntimeError("no optimized_key set on job")
+        if job.get("media_type") == "image":
+            _process_image(job_id, job, optimized_key)
+            return
         print(f"[{job_id}] fetching video URL for optimize", flush=True)
         _, vdata = _req("GET", f"/api/processor/video/{job_id}")
         url = vdata.get("url")

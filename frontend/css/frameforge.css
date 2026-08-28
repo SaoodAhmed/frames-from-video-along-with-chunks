@@ -262,6 +262,9 @@ h3 { font-size: 14px; text-transform: uppercase; letter-spacing: 1px; color: var
 .upload-row.ok .upload-row-status { color: #2e9e5b; }
 .upload-row.err .upload-row-status { color: #e5484d; }
 
+/* User gallery image thumbnails */
+.gallery-thumb { width: 42px; height: 42px; object-fit: cover; border-radius: 6px; margin-right: 8px; vertical-align: middle; }
+
 /* ── Tables ───────────────────────────────────────────────── */
 .table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; }

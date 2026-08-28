@@ -3,7 +3,8 @@ import type { Env } from "../env";
 import { S3_REGION } from "../env";
 import { getR2Host, presignPutPart } from "../lib/s3";
 import { requireAuth } from "../middleware/auth";
-import { createJob, getJobForUser, getJob } from "../db/jobs";
+import { createJob, getJobForUser, getJob, transitionOptimize } from "../db/jobs";
+import { triggerGitHubDispatch } from "../lib/github";
 import { r2Keys } from "../types";
 import type { JwtUser } from "../types";
 
@@ -63,15 +64,13 @@ uploads.post("/create", requireAuth, async (c) => {
   if (mediaType === null) {
     return c.json({ error: "Unsupported media type (expected a video or image)" }, 415);
   }
-  // Phase 1 ships video optimization; images are accepted by the API but the
-  // image optimizer lands in Phase 2 — reject images for now with a clear error.
-  if (mediaType === "image") {
-    return c.json({ error: "Image upload is not available yet" }, 415);
-  }
 
   const filename = sanitizeFilename(rawFilename);
   const jobId = crypto.randomUUID();
-  const r2Key = r2Keys.originalVideo(user.sub, jobId, filename);
+  const r2Key =
+    mediaType === "image"
+      ? r2Keys.originalImage(user.sub, jobId, filename)
+      : r2Keys.originalVideo(user.sub, jobId, filename);
 
   // Insert the job record first (status = uploaded).
   await createJob(c.env.DB, {
@@ -80,8 +79,8 @@ uploads.post("/create", requireAuth, async (c) => {
     original_filename: filename,
     r2_video_key: r2Key,
     file_size: size,
-    mime_type: mimeType || "video/mp4",
-    media_type: "video",
+    mime_type: mimeType || (mediaType === "image" ? "image/jpeg" : "video/mp4"),
+    media_type: mediaType,
   });
 
   // Initiate multipart upload on R2.
@@ -198,6 +197,22 @@ uploads.post("/complete", requireAuth, async (c) => {
     )
       .bind(done.size ?? head.size ?? job.file_size, now, jobId)
       .run();
+
+    // Images need no admin step — auto-queue optimization now that the object
+    // exists (queuing at create would race the multipart upload). The output
+    // keys are fixed here so the runner never has to compute them.
+    if (job.media_type === "image") {
+      const queued = await transitionOptimize(c.env.DB, jobId, "none", "queued", {
+        optimized_key: r2Keys.optimizedImage(user.sub, jobId),
+        optimized_thumb_key: r2Keys.thumbImage(user.sub, jobId),
+      });
+      if (queued) {
+        const exec = c.executionCtx;
+        const waitUntil = exec?.waitUntil ? exec.waitUntil.bind(exec) : ((p: Promise<unknown>) => void p);
+        await triggerGitHubDispatch(c.env, { waitUntil }, { jobId, action: "optimize" });
+      }
+    }
+
     return c.json({ ok: true, jobId, size: done.size ?? head.size });
   } catch (err) {
     console.error("upload complete failed", err);

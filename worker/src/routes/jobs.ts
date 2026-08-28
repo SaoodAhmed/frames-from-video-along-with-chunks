@@ -366,7 +366,6 @@ jobs.post("/:id/optimize", requireAdmin, async (c) => {
   const jobId = c.req.param("id");
   const job = await getJob(c.env.DB, jobId);
   if (!job) return c.json({ error: "Not found" }, 404);
-  if (job.media_type === "image") return c.json({ error: "Images optimize automatically" }, 409);
 
   let body: Record<string, unknown>;
   try {
@@ -389,15 +388,18 @@ jobs.post("/:id/optimize", requireAdmin, async (c) => {
     if (key) await Promise.allSettled([c.env.R2.delete(key)]);
   }
 
-  const optimizedKey = r2Keys.optimizedVideo(job.user_id, jobId);
+  const isImage = job.media_type === "image";
+  const optimizedKey = isImage ? r2Keys.optimizedImage(job.user_id, jobId) : r2Keys.optimizedVideo(job.user_id, jobId);
+  const thumbKey = isImage ? r2Keys.thumbImage(job.user_id, jobId) : null;
   const ok = await transitionOptimize(c.env.DB, jobId, job.optimize_status, "queued", {
     opt_crf: crf,
     opt_max_dim: maxDim,
     optimized_key: optimizedKey,
     optimized_size: null,
     optimized_duration: null,
-    optimized_thumb_key: null,
+    optimized_thumb_key: thumbKey,
     opt_format: null,
+    error_message: null,
   });
   if (!ok) return c.json({ error: "Cannot start optimization now" }, 409);
 

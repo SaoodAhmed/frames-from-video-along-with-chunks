@@ -172,15 +172,23 @@
     const body = $("videos-body");
     body.innerHTML = "";
     for (const j of jobs) {
+      const isImage = j.media_type === "image";
+      const dl = j.optimize_status === "completed" && j.optimizedUrl
+        ? `<a class="btn small" href="${j.optimizedUrl}" target="_blank" rel="noopener">Download</a>`
+        : "";
+      const nameCell = isImage && j.thumbUrl
+        ? `<td class="mono"><img class="gallery-thumb" src="${j.thumbUrl}" alt="" loading="lazy" />${escapeHtml(j.original_filename)}</td>`
+        : `<td class="mono">${escapeHtml(j.original_filename)}</td>`;
       const tr = document.createElement("tr");
       tr.innerHTML = `
-        <td class="mono">${escapeHtml(j.original_filename)}</td>
+        ${nameCell}
         <td>${API.fmtBytes(j.file_size)}</td>
-        <td class="mono">${API.fmtDuration(j.duration)}</td>
+        <td class="mono">${isImage ? (j.width && j.height ? `${j.width}×${j.height}` : "—") : API.fmtDuration(j.duration)}</td>
         <td class="mono small muted">${new Date(j.created_at).toLocaleString()}</td>
-        <td class="mono">${j.extracted_frames || 0}</td>
-        <td>${renderChunkCell(j)}</td>
-        <td><span class="badge ${j.status}">${API.statusLabel(j.status)}</span></td>`;
+        <td class="mono">${isImage ? "—" : (j.extracted_frames || 0)}</td>
+        <td>${isImage ? '<span class="muted small">—</span>' : renderChunkCell(j)}</td>
+        <td><span class="badge ${j.status}">${API.statusLabel(j.status)}</span></td>
+        <td>${dl}</td>`;
       body.appendChild(tr);
     }
   }

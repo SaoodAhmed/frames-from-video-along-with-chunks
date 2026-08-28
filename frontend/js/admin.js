@@ -254,9 +254,11 @@
     if (!["queued", "processing"].includes(j.status) && !["queued", "processing"].includes(j.chunk_status)) {
       addBtn(actions, "Split into Chunks", "", splitChunks);
     }
-    // Optimize is a video-only, independent step; hidden while frames/chunks are
-    // actively running and while an optimization is already queued/processing.
-    if (j.media_type !== "image" && !["queued", "processing"].includes(j.status) && !["queued", "processing"].includes(j.chunk_status) && !["queued", "processing"].includes(j.optimize_status)) {
+    // Optimize is an independent step; hidden while frames/chunks are actively
+    // running and while an optimization is already queued/processing. Images
+    // auto-optimize, so the button only appears to retry a failed one.
+    const optIdle = !["queued", "processing"].includes(j.status) && !["queued", "processing"].includes(j.chunk_status) && !["queued", "processing"].includes(j.optimize_status);
+    if ((j.media_type !== "image" && optIdle) || (j.media_type === "image" && j.optimize_status === "failed")) {
       addBtn(actions, j.optimize_status === "completed" ? "Re-optimize" : "Optimize", "ghost", optimizeJob);
     }
     if (j.optimize_status === "completed" && j.optimizedUrl) {
@@ -549,15 +551,19 @@
       $("job-err").textContent = "Wait for frame extraction / chunk splitting to finish before optimizing.";
       return;
     }
-    const maxDimRaw = prompt("Max width for the optimized video (0 = keep original resolution):", "0");
+    const isImage = j.media_type === "image";
+    const maxDimRaw = prompt(isImage ? "Max width (0 = keep original size):" : "Max width for the optimized video (0 = keep original resolution):", "0");
     if (maxDimRaw === null) return;
-    const crfRaw = prompt("CRF quality (0-45, lower = better quality / larger file, default 23):", "23");
-    if (crfRaw === null) return;
-    const crf = parseInt(crfRaw, 10);
-    if (!Number.isFinite(crf) || crf < 0 || crf > 45) { $("job-err").textContent = "CRF must be between 0 and 45."; return; }
     const maxDim = parseInt(maxDimRaw, 10);
-    const body = { crf };
+    const body = {};
     if (Number.isFinite(maxDim) && maxDim > 0) body.maxDim = maxDim;
+    if (!isImage) {
+      const crfRaw = prompt("CRF quality (0-45, lower = better quality / larger file, default 23):", "23");
+      if (crfRaw === null) return;
+      const crf = parseInt(crfRaw, 10);
+      if (!Number.isFinite(crf) || crf < 0 || crf > 45) { $("job-err").textContent = "CRF must be between 0 and 45."; return; }
+      body.crf = crf;
+    }
     $("job-err").textContent = "";
     try {
       const data = await API.request(`/api/jobs/${state.job.id}/optimize`, { method: "POST", body });

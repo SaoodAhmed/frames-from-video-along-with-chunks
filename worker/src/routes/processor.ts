@@ -395,7 +395,7 @@ processor.post("/optimize/:jobId/meta", async (c) => {
 processor.post("/optimize/complete/:jobId", async (c) => {
   if (!authorize(c)) return c.json({ error: "Unauthorized" }, 401);
   const jobId = c.req.param("jobId");
-  let body: { size?: number; duration?: number };
+  let body: { size?: number; duration?: number; format?: string };
   try {
     body = await c.req.json();
   } catch {
@@ -404,6 +404,8 @@ processor.post("/optimize/complete/:jobId", async (c) => {
   const ok = await transitionOptimize(c.env.DB, jobId, "processing", "completed", {
     optimized_size: typeof body.size === "number" ? body.size : null,
     optimized_duration: typeof body.duration === "number" ? body.duration : null,
+    opt_format: typeof body.format === "string" ? body.format : null,
+    error_message: null,
   });
   if (!ok) return c.json({ error: "Optimization not completable" }, 409);
   return c.json({ ok: true });
