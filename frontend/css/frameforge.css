@@ -308,7 +308,7 @@ td .mono { font-size: 12px; }
 
 /* ── Modal / Preview ──────────────────────────────────────── */
 .modal-backdrop {
-  position: fixed; inset: 0; background: rgba(0,0,0,0.8);
+  position: fixed; inset: 0; background: rgba(0,0,0,0.82);
   display: flex; align-items: center; justify-content: center; z-index: 50;
   padding: 20px;
 }
@@ -317,6 +317,7 @@ td .mono { font-size: 12px; }
   border-top: 3px solid var(--brand);
   max-width: 940px; width: 100%; max-height: 92vh; overflow: hidden;
   display: flex; flex-direction: column;
+  position: relative; z-index: 2;
 }
 .modal-header { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid var(--border); }
 .modal-body { padding: 18px; overflow-y: auto; }
@@ -668,8 +669,8 @@ tr.loading td { color: var(--muted); font-style: italic; }
 .pager-num { color: var(--muted); font-family: var(--mono); font-size: 12px; }
 
 /* ── Preview modal ─────────────────────────────────────────── */
-.modal { position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center; }
-.modal-backdrop { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.82); }
+.preview-modal { position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center; }
+.preview-modal .modal-backdrop { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.82); }
 .preview-shell {
   position: relative; z-index: 2;
   max-width: min(1200px, 92vw); max-height: 92vh;

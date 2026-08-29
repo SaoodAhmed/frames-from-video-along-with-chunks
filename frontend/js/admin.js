@@ -88,6 +88,8 @@
       $("view-title").textContent = a.textContent;
       $("view-job").classList.add("hidden");
       $("view-videos").classList.remove("hidden");
+      $("view-users").classList.add("hidden");
+      $("view-optimized").classList.add("hidden");
       loadJobs();
       loadStats();
     });
@@ -159,24 +161,14 @@
         <td>
           <div class="row gap-8">
             <button class="btn ghost small act-view" data-id="${j.id}">View</button>
-            ${["uploaded", "failed", "cancelled"].includes(j.status) ? `<button class="btn small act-process" data-id="${j.id}">Process</button>` : ""}
             ${j.status === "failed" ? `<button class="btn ghost small act-retry" data-id="${j.id}">Retry</button>` : ""}
-            ${isJobIdle(j) ? `<button class="btn ghost small act-optimize" data-id="${j.id}" title="Manually optimize to any format">Optimize</button>` : ""}
             <button class="btn danger small act-delete" data-id="${j.id}">Delete</button>
           </div>
         </td>`;
       body.appendChild(tr);
     }
     body.querySelectorAll(".act-view").forEach((b) => b.addEventListener("click", () => openJob(b.dataset.id)));
-    body.querySelectorAll(".act-process").forEach((b) => b.addEventListener("click", () => openJob(b.dataset.id)));
     body.querySelectorAll(".act-retry").forEach((b) => b.addEventListener("click", () => retryJob(b.dataset.id)));
-    body.querySelectorAll(".act-optimize").forEach((b) => b.addEventListener("click", async () => {
-      try {
-        const data = await API.request(`/api/jobs/${b.dataset.id}`);
-        state.job = data.job;
-        openOptimizeModal("job", [b.dataset.id]);
-      } catch (err) { alert("Failed to load job: " + err.message); }
-    }));
     body.querySelectorAll(".act-delete").forEach((b) => b.addEventListener("click", () => deleteJob(b.dataset.id)));
     body.querySelectorAll(".job-check").forEach((cb) => cb.addEventListener("change", (e) => {
       if (e.target.checked) state.selectedJobs.add(cb.dataset.id); else state.selectedJobs.delete(cb.dataset.id);
@@ -205,12 +197,6 @@
     if (state.selectedJobs.size === 0) return;
     openOptimizeModal("bulk", [...state.selectedJobs]);
   });
-
-  function isJobIdle(j) {
-    return !["queued", "processing"].includes(j.status)
-      && !["queued", "processing"].includes(j.chunk_status)
-      && !["queued", "processing"].includes(j.optimize_status);
-  }
 
   function renderChunkCell(j) {
     if (!j.chunk_status || j.chunk_status === "none") return '<span class="muted small">—</span>';
@@ -302,7 +288,11 @@
       addBtn(actions, "Delete", "danger", () => deleteJob(j.id));
     }
     if (!["queued", "processing"].includes(j.status) && !["queued", "processing"].includes(j.chunk_status)) {
-      addBtn(actions, "Split into Chunks", "", splitChunks);
+      // Re-splitting only; when there are no chunks yet the chunks-panel empty
+      // state shows its own "Split into Chunks" CTA so we don't duplicate it.
+      const splitBtn = addBtn(actions, "Split into Chunks", "", splitChunks);
+      splitBtn.id = "act-split-btn";
+      splitBtn.style.display = state.chunks.length ? "" : "none";
     }
     // Optimize is an independent step; hidden only while frames/chunks are
     // actively running or an optimization is already queued/processing. Images
@@ -361,6 +351,7 @@
     btn.textContent = text;
     btn.addEventListener("click", onClick);
     parent.appendChild(btn);
+    return btn;
   }
 
   function toast(msg, type = "ok") {
@@ -747,6 +738,9 @@
     if (j) {
       const canSplit = !["queued", "processing"].includes(j.status) && !["queued", "processing"].includes(j.chunk_status);
       $("empty-split").classList.toggle("hidden", !canSplit);
+      // Mirror the split entry point to the actions row once chunks exist.
+      const sb = $("act-split-btn");
+      if (sb) sb.style.display = canSplit && state.chunks.length ? "" : "none";
     }
     $("chunks-gallery").innerHTML = "";
     $("chunk-sel-count").textContent = `${state.selectedChunks.size} selected`;
