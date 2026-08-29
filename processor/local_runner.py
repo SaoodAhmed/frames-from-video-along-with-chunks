@@ -193,14 +193,25 @@ def _optimize_filter(maxdim):
 
 def _user_segment(job):
     """R2 key segment for a job: the email (new uploads) or legacy uid. Always
-    derived from the stored r2_video_key (`users/{segment}/jobs/...`) so old and
-    new jobs work identically."""
+    derived from the stored r2_video_key (`users/{segment}/{folder}/jobs/...`) so
+    old and new jobs work identically."""
     key = job.get("r2_video_key") or ""
     if key.startswith("users/"):
         parts = key.split("/")
         if len(parts) > 1:
             return parts[1]
     return job.get("user_id") or ""
+
+
+def _folder_segment(job):
+    """R2 folder segment for a job (`users/{seg}/{folder}/jobs/...`), "root" when
+    the job lives in the email root."""
+    key = job.get("r2_video_key") or ""
+    if key.startswith("users/"):
+        parts = key.split("/")
+        if len(parts) > 2:
+            return parts[2]
+    return "root"
 
 
 def get_queue():
@@ -236,6 +247,7 @@ def process_job(job_id):
         return
     job = data.get("job") or {}
     seg = _user_segment(job)
+    folder = _folder_segment(job)
 
     local = None
     try:
@@ -268,8 +280,8 @@ def process_job(job_id):
         for fr in gen:
             count += 1
             fn = fr["frame_number"]
-            full_key = config.full_frame_key(seg, job_id, fn)
-            thumb_key = config.thumb_frame_key(seg, job_id, fn)
+            full_key = config.full_frame_key(seg, folder, job_id, fn)
+            thumb_key = config.thumb_frame_key(seg, folder, job_id, fn)
             _put_r2_retry(full_key, fr["full_bytes"], "image/jpeg", f"full {fn}")
             _put_r2_retry(thumb_key, fr["thumb_bytes"], "image/jpeg", f"thumb {fn}")
             q = f"?src={fr['source_frame_number']}&t={fr['timestamp']:.3f}&w={fr['width']}&h={fr['height']}"
@@ -287,7 +299,7 @@ def process_job(job_id):
 
         # Video poster for the user-gallery card: first try 1s in (fast seek),
         # fall back to the first frame, then give up silently if ffmpeg can't.
-        poster_key = config.video_thumb_key(seg, job_id)
+        poster_key = config.video_thumb_key(seg, folder, job_id)
         poster_path = os.path.join(tempfile.gettempdir(), f"frameforge_poster_{job_id}.jpg")
         poster_ok = False
         try:
@@ -337,6 +349,7 @@ def process_chunks(job_id):
         return
     job = data.get("job") or {}
     seg = _user_segment(job)
+    folder = _folder_segment(job)
 
     local = None
     tmpdir = None
@@ -396,7 +409,7 @@ def process_chunks(job_id):
             if size == 0:
                 raise RuntimeError(f"ffmpeg produced empty chunk {i}")
 
-            key = config.chunk_video_key(seg, job_id, i)
+            key = config.chunk_video_key(seg, folder, job_id, i)
             with open(out_path, "rb") as f:
                 _put_r2_retry(key, f.read(), "video/mp4", f"chunk {i}")
             os.remove(out_path)
@@ -708,6 +721,7 @@ def process_frame_opt(batch_id):
 
     job_id = batch.get("job_id") or job.get("id") or ""
     seg = _user_segment(job)
+    folder = _folder_segment(job)
     fmt = batch.get("format") or "webp"
     quality = int(batch.get("quality") or 85)
     maxdim = batch.get("max_dim")
@@ -750,7 +764,7 @@ def process_frame_opt(batch_id):
             if size == 0:
                 raise RuntimeError(f"frameopt produced empty output for frame {fn}")
 
-            dst = config.optimized_frame_key(seg, job_id, fmt, fn)
+            dst = config.optimized_frame_key(seg, folder, job_id, fmt, fn)
             with open(out_path, "rb") as fh:
                 _put_r2_retry(dst, fh.read(), ct, f"opt frame {fn}")
             os.remove(src)

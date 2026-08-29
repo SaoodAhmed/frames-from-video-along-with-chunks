@@ -2,7 +2,7 @@ import type { D1Database } from "@cloudflare/workers-types";
 import { canTransition, canTransitionChunk, canTransitionOptimize } from "../types";
 import type { Job, JobStatus, Chunk, ChunkStatus, OptimizeStatus } from "../types";
 
-const JOB_FIELDS = `id, user_id, original_filename, r2_video_key, file_size, mime_type,
+const JOB_FIELDS = `id, user_id, folder_id, sha256, original_filename, r2_video_key, file_size, mime_type,
   media_type, status, source_fps, duration, width, height, total_source_frames, extraction_fps,
   extraction_mode, sharpness, scene_threshold, extracted_frames, processed_frames,
   error_message, chunk_status, chunk_count, chunk_processed, chunk_total, chunk_error,
@@ -38,6 +38,8 @@ export async function createJob(
   input: {
     id: string;
     user_id: string;
+    folder_id?: string | null;
+    sha256?: string | null;
     original_filename: string;
     r2_video_key: string;
     file_size: number;
@@ -49,13 +51,15 @@ export async function createJob(
   const now = new Date().toISOString();
   await db
     .prepare(
-      `INSERT INTO jobs (id, user_id, original_filename, r2_video_key, file_size,
-        mime_type, media_type, optimize_status, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'uploaded', ?, ?)`
+      `INSERT INTO jobs (id, user_id, folder_id, sha256, original_filename, r2_video_key,
+        file_size, mime_type, media_type, optimize_status, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'uploaded', ?, ?)`
     )
     .bind(
       input.id,
       input.user_id,
+      input.folder_id ?? null,
+      input.sha256 ?? null,
       input.original_filename,
       input.r2_video_key,
       input.file_size,
@@ -113,6 +117,42 @@ export async function listUserJobs(db: D1Database, userId: string): Promise<Job[
     .bind(userId)
     .all<Job>();
   return rows.results ?? [];
+}
+
+/**
+ * User gallery listing with folder + media-type filters and pagination.
+ * folderId null => the email root (folder_id IS NULL). Pass folderId undefined
+ * to include every folder (the "All Media" root view).
+ */
+export async function listUserJobsFiltered(
+  db: D1Database,
+  userId: string,
+  opts: { folderId?: string | null; mediaType?: "image" | "video"; page: number; perPage: number }
+): Promise<{ rows: Job[]; total: number }> {
+  const where: string[] = ["user_id = ?"];
+  const params: unknown[] = [userId];
+
+  if (opts.folderId !== undefined) {
+    where.push("COALESCE(folder_id, '') = ?");
+    params.push(opts.folderId ?? "");
+  }
+  if (opts.mediaType) {
+    where.push("media_type = ?");
+    params.push(opts.mediaType);
+  }
+
+  const whereSql = `WHERE ${where.join(" AND ")}`;
+  const count = await db
+    .prepare(`SELECT COUNT(*) AS n FROM jobs ${whereSql}`)
+    .bind(...params)
+    .first<{ n: number }>();
+
+  const rows = await db
+    .prepare(`SELECT ${JOB_FIELDS} FROM jobs ${whereSql} ORDER BY created_at DESC LIMIT ? OFFSET ?`)
+    .bind(...params, opts.perPage, (opts.page - 1) * opts.perPage)
+    .all<Job>();
+
+  return { rows: rows.results ?? [], total: count?.n ?? 0 };
 }
 
 export async function listAllJobs(

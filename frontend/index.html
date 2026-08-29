@@ -41,10 +41,15 @@
         <span class="logo">KEN<span class="accent">DUIT</span></span>
         <span class="ver">v3.1 web</span>
       </div>
+      <div class="sidebar-head">Folders</div>
       <div class="nav">
-        <a href="#" data-nav="videos" class="active">My Media</a>
+        <button class="nav-item active" data-folder-id="" type="button">
+          <span class="nav-icon">🗂️</span><span>All Media</span>
+        </button>
+        <div id="folder-tree"></div>
       </div>
       <div class="sidebar-footer">
+        <button class="btn ghost small block" id="btn-new-folder" type="button">+ New folder</button>
         <div class="user-email" id="user-email"></div>
         <button class="btn ghost small block" id="btn-logout" type="button">Log out</button>
       </div>
@@ -52,11 +57,30 @@
 
     <main class="main">
       <div class="toolbar">
-        <h1>My Media</h1>
+        <div class="toolbar-titles">
+          <h1 id="view-title">All Media</h1>
+          <nav class="breadcrumb" id="breadcrumb"></nav>
+        </div>
         <span class="toolbar-note" id="library-note">—</span>
+        <div class="tabs" id="media-tabs">
+          <button data-type="all" class="active" type="button">All</button>
+          <button data-type="image" type="button">Images</button>
+          <button data-type="video" type="button">Videos</button>
+        </div>
         <div class="spacer"></div>
         <input id="gallery-search" class="input search-box" type="text" placeholder="Search media…" />
         <button class="btn" id="btn-upload" type="button">+ Upload</button>
+      </div>
+
+      <!-- Selection bar -->
+      <div id="selection-bar" class="selection-bar hidden">
+        <span id="sel-count">0 selected</span>
+        <div class="spacer"></div>
+        <button class="btn ghost small" id="sel-all" type="button">Select all</button>
+        <button class="btn ghost small" id="sel-none" type="button">Deselect</button>
+        <button class="btn small" id="sel-download" type="button">Download</button>
+        <button class="btn small" id="sel-zip" type="button">ZIP</button>
+        <button class="btn small danger" id="sel-delete" type="button">Delete</button>
       </div>
 
       <!-- Upload panel -->
@@ -69,7 +93,7 @@
         <input id="folder-input" type="file" class="hidden" multiple webkitdirectory />
         <div id="dropzone" class="dropzone">
           <div class="dz-title">Drag &amp; Drop files or a whole folder here</div>
-          <div class="dz-sub">images + videos · multiple files or a media folder</div>
+          <div class="dz-sub">images + videos · saves into <b id="upload-folder-label">All Media</b> · duplicates are skipped automatically</div>
         </div>
         <div id="upload-batch" class="hidden mt-12"></div>
         <div class="auth-err" id="upload-err"></div>
@@ -77,15 +101,29 @@
 
       <div id="videos-empty" class="empty-state">
         <div class="empty-icon">🗂️</div>
-        <div>No media yet. Upload files or a folder and they'll appear here.</div>
+        <div id="empty-text">No media yet. Upload files or a folder and they'll appear here.</div>
         <div class="empty-cta"><button class="btn" id="empty-upload" type="button">+ Upload your first media</button></div>
       </div>
       <div id="gallery" class="gallery media-gallery hidden"></div>
+      <div id="gallery-pager" class="pager hidden"></div>
+
+      <!-- Preview modal -->
+      <div id="preview-modal" class="modal hidden">
+        <div class="modal-backdrop" id="preview-backdrop"></div>
+        <div class="preview-shell">
+          <button class="preview-close" id="preview-close" type="button" aria-label="Close">✕</button>
+          <button class="preview-nav prev" id="preview-prev" type="button" aria-label="Previous">‹</button>
+          <div class="preview-body" id="preview-body"></div>
+          <button class="preview-nav next" id="preview-next" type="button" aria-label="Next">›</button>
+          <div class="preview-caption" id="preview-caption"></div>
+        </div>
+      </div>
     </main>
   </div>
 
   <div class="toast-wrap" id="toast-wrap"></div>
   <script src="/js/api.js"></script>
+  <script src="/js/sha256.js"></script>
   <script src="/js/user.js"></script>
 </body>
 </html>

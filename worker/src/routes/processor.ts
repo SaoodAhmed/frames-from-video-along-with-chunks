@@ -11,7 +11,7 @@ import {
   listChunkKeys,
 } from "../db/jobs";
 import { getOptBatch, listFramesByIds, transitionOptBatch, updateOptBatchProgress } from "../db/opt";
-import { r2Keys, userSegmentFromKey, IMAGE_EXT } from "../lib/r2";
+import { r2Keys, userSegmentFromKey, folderSegmentFromKey, IMAGE_EXT } from "../lib/r2";
 import type { ImageFormat } from "../lib/r2";
 import type { Job, ExportKind, Frame, OptBatch } from "../types";
 
@@ -81,7 +81,7 @@ processor.put("/frame/:jobId/:frameNumber", async (c) => {
   const body = c.req.raw.body;
   if (!body) return c.json({ error: "Empty body" }, 400);
 
-  const fullKey = `users/${userSegmentFromKey(job.r2_video_key)}/jobs/${jobId}/frames/full/frame_${String(frameNumber).padStart(4, "0")}.jpg`;
+  const fullKey = `users/${userSegmentFromKey(job.r2_video_key)}/${folderSegmentFromKey(job.r2_video_key)}/jobs/${jobId}/frames/full/frame_${String(frameNumber).padStart(4, "0")}.jpg`;
   try {
     await c.env.R2.put(fullKey, body, { httpMetadata: { contentType: "image/jpeg" } });
   } catch (err) {
@@ -113,7 +113,7 @@ processor.put("/frame/:jobId/:frameNumber/thumb", async (c) => {
   const body = c.req.raw.body;
   if (!body) return c.json({ error: "Empty body" }, 400);
 
-  const fullKey = `users/${userSegmentFromKey(job.r2_video_key)}/jobs/${jobId}/frames/full/frame_${String(frameNumber).padStart(4, "0")}.jpg`;
+  const fullKey = `users/${userSegmentFromKey(job.r2_video_key)}/${folderSegmentFromKey(job.r2_video_key)}/jobs/${jobId}/frames/full/frame_${String(frameNumber).padStart(4, "0")}.jpg`;
   const thumbKey = fullKey.replace("/frames/full/", "/frames/thumbs/");
   try {
     await c.env.R2.put(thumbKey, body, { httpMetadata: { contentType: "image/jpeg" } });
@@ -143,7 +143,7 @@ processor.post("/frame/:jobId/:frameNumber/meta", async (c) => {
   if (!job) return c.json({ error: "Not found" }, 404);
   if (job.status !== "processing") return c.json({ error: "Job is not processing" }, 409);
 
-  const fullKey = `users/${userSegmentFromKey(job.r2_video_key)}/jobs/${jobId}/frames/full/frame_${String(frameNumber).padStart(4, "0")}.jpg`;
+  const fullKey = `users/${userSegmentFromKey(job.r2_video_key)}/${folderSegmentFromKey(job.r2_video_key)}/jobs/${jobId}/frames/full/frame_${String(frameNumber).padStart(4, "0")}.jpg`;
   const id = crypto.randomUUID();
   await c.env.DB.prepare(
     `INSERT INTO frames (id, job_id, frame_number, source_frame_number, timestamp, r2_key, width, height, deleted, created_at)
@@ -268,7 +268,7 @@ processor.post("/chunk/:jobId/:chunkNumber/meta", async (c) => {
   if (!job) return c.json({ error: "Not found" }, 404);
   if (job.chunk_status !== "processing") return c.json({ error: "Chunks are not processing" }, 409);
 
-  const r2Key = r2Keys.chunkVideo(userSegmentFromKey(job.r2_video_key), jobId, chunkNumber);
+  const r2Key = r2Keys.chunkVideo(userSegmentFromKey(job.r2_video_key), folderSegmentFromKey(job.r2_video_key), jobId, chunkNumber);
   await insertChunk(c.env.DB, {
     id: crypto.randomUUID(),
     job_id: jobId,
@@ -574,11 +574,27 @@ processor.get("/exports/:exportId", async (c) => {
   const job = await getJob(c.env.DB, exp.job_id);
   if (!job) return c.json({ error: "Job not found" }, 404);
 
-  const kind = exp.kind === "chunks" ? "chunks" : exp.kind === "frames_opt" ? "frames_opt" : "frames";
+  const kind = exp.kind === "chunks" ? "chunks" : exp.kind === "frames_opt" ? "frames_opt" : exp.kind === "folder" ? "folder" : "frames";
   const seg = userSegmentFromKey(job.r2_video_key);
+  const folder = folderSegmentFromKey(job.r2_video_key);
   let items: { key: string; name: string }[] = [];
 
-  if (kind === "chunks") {
+  if (kind === "folder") {
+    // Bundle every job's original + optimized file in this folder. job_id points
+    // at the folder's first job (FK NOT NULL); seg/folder come from its key.
+    const folderJobs = await c.env.DB
+      .prepare(
+        `SELECT original_filename, r2_video_key, optimized_key FROM jobs
+         WHERE user_id = ? AND COALESCE(folder_id, '') = ? ORDER BY original_filename`
+      )
+      .bind(job.user_id, folder)
+      .all<{ original_filename: string; r2_video_key: string; optimized_key: string | null }>();
+    items = [];
+    for (const fj of folderJobs.results ?? []) {
+      items.push({ key: fj.r2_video_key, name: fj.original_filename });
+      if (fj.optimized_key) items.push({ key: fj.optimized_key, name: `optimized_${fj.original_filename}` });
+    }
+  } else if (kind === "chunks") {
     let keys: { id: string; r2_key: string; chunk_number: number }[];
     if (exp.export_type === "selected" && exp.chunk_ids) {
       const ids = JSON.parse(exp.chunk_ids) as string[];
@@ -602,7 +618,7 @@ processor.get("/exports/:exportId", async (c) => {
     const fmt = batch.format as ImageFormat;
     const ext = IMAGE_EXT[fmt];
     items = frames.map((f) => ({
-      key: r2Keys.optimizedFrame(seg, job.id, fmt, f.frame_number),
+      key: r2Keys.optimizedFrame(seg, folder, job.id, fmt, f.frame_number),
       name: `frame_${String(f.frame_number).padStart(4, "0")}.${ext}`,
     }));
   } else {
@@ -632,8 +648,8 @@ processor.get("/exports/:exportId", async (c) => {
 
   const exportKey =
     exp.export_type === "selected"
-      ? r2Keys.exportSelected(seg, job.id, kind)
-      : r2Keys.exportAll(seg, job.id, kind);
+      ? r2Keys.exportSelected(seg, folder, job.id, kind)
+      : r2Keys.exportAll(seg, folder, job.id, kind);
 
   return c.json({ exportId: exp.id, job_id: exp.job_id, export_type: exp.export_type, kind, status: exp.status, exportKey, items });
 });

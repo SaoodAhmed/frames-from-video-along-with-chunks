@@ -40,6 +40,36 @@ function sanitizeFilename(raw: string): string {
   return cleaned.slice(0, 180) || "video.mp4";
 }
 
+// POST /check {folderId?, sha256} — dedup guard. Returns the existing job when
+// the user already uploaded a byte-identical file to the same folder (or root).
+uploads.post("/check", requireAuth, async (c) => {
+  const user = c.get("user");
+  let body: Record<string, unknown>;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "Invalid JSON body" }, 400);
+  }
+  const folderId = typeof body.folderId === "string" ? body.folderId : null;
+  const sha256 = typeof body.sha256 === "string" ? body.sha256 : "";
+  if (!sha256) return c.json({ error: "sha256 is required" }, 400);
+
+  const existing = await c.env.DB
+    .prepare(
+      `SELECT original_filename, file_size, created_at FROM jobs
+       WHERE user_id = ? AND COALESCE(folder_id, '') = ? AND sha256 = ? LIMIT 1`
+    )
+    .bind(user.sub, folderId ?? "", sha256)
+    .first<{ original_filename: string; file_size: number; created_at: string }>();
+
+  return c.json({
+    duplicate: Boolean(existing),
+    existing: existing
+      ? { filename: existing.original_filename, size: existing.file_size, created_at: existing.created_at }
+      : null,
+  });
+});
+
 uploads.post("/create", requireAuth, async (c) => {
   const user = c.get("user");
   let body: Record<string, unknown>;
@@ -52,6 +82,8 @@ uploads.post("/create", requireAuth, async (c) => {
   const rawFilename = typeof body.filename === "string" ? body.filename : "";
   const size = typeof body.size === "number" ? body.size : 0;
   const mimeType = typeof body.mimeType === "string" ? body.mimeType : "";
+  const folderId = typeof body.folderId === "string" ? body.folderId : null;
+  const sha256 = typeof body.sha256 === "string" && body.sha256.length ? body.sha256 : null;
 
   if (!rawFilename || size <= 0) {
     return c.json({ error: "filename and size are required" }, 400);
@@ -65,23 +97,45 @@ uploads.post("/create", requireAuth, async (c) => {
     return c.json({ error: "Unsupported media type (expected a video or image)" }, 415);
   }
 
+  // folderId (when given) must belong to this user; NULL = the email root.
+  if (folderId) {
+    const folder = await c.env.DB
+      .prepare("SELECT id FROM folders WHERE id = ? AND user_id = ?")
+      .bind(folderId, user.sub)
+      .first<{ id: string }>();
+    if (!folder) return c.json({ error: "Folder not found" }, 404);
+  }
+
   const filename = sanitizeFilename(rawFilename);
   const jobId = crypto.randomUUID();
   const r2Key =
     mediaType === "image"
-      ? r2Keys.originalImage(user.email, jobId, filename)
-      : r2Keys.originalVideo(user.email, jobId, filename);
+      ? r2Keys.originalImage(user.email, folderId, jobId, filename)
+      : r2Keys.originalVideo(user.email, folderId, jobId, filename);
 
   // Insert the job record first (status = uploaded).
-  await createJob(c.env.DB, {
-    id: jobId,
-    user_id: user.sub,
-    original_filename: filename,
-    r2_video_key: r2Key,
-    file_size: size,
-    mime_type: mimeType || (mediaType === "image" ? "image/jpeg" : "video/mp4"),
-    media_type: mediaType,
-  });
+  try {
+    await createJob(c.env.DB, {
+      id: jobId,
+      user_id: user.sub,
+      folder_id: folderId,
+      sha256,
+      original_filename: filename,
+      r2_video_key: r2Key,
+      file_size: size,
+      mime_type: mimeType || (mediaType === "image" ? "image/jpeg" : "video/mp4"),
+      media_type: mediaType,
+    });
+  } catch (err) {
+    // Unique index idx_jobs_dedup backstop: an identical (user, folder, sha256)
+    // job already exists — raced past the /uploads/check guard.
+    const cause = (err as Error | undefined)?.cause as { message?: string } | undefined;
+    const msg = cause?.message ?? (err as Error)?.message ?? "";
+    if (msg.includes("UNIQUE constraint failed")) {
+      return c.json({ error: "duplicate" }, 409);
+    }
+    throw err;
+  }
 
   // Initiate multipart upload on R2.
   const mpu = await c.env.R2.createMultipartUpload(r2Key);
@@ -203,8 +257,8 @@ uploads.post("/complete", requireAuth, async (c) => {
     // keys are fixed here so the runner never has to compute them.
     if (job.media_type === "image") {
       const queued = await transitionOptimize(c.env.DB, jobId, "none", "queued", {
-        optimized_key: r2Keys.optimizedImage(user.email, jobId),
-        optimized_thumb_key: r2Keys.thumbImage(user.email, jobId),
+        optimized_key: r2Keys.optimizedImage(user.email, job.folder_id, jobId),
+        optimized_thumb_key: r2Keys.thumbImage(user.email, job.folder_id, jobId),
         opt_format: "webp",
         opt_quality: 85,
       });

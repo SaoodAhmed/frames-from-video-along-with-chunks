@@ -43,6 +43,9 @@
         <a href="#" data-filter="queued">Processing</a>
         <a href="#" data-filter="completed">Completed</a>
         <a href="#" data-filter="failed">Failed</a>
+        <div class="nav-divider"></div>
+        <a href="#" data-view="users">Users</a>
+        <a href="#" data-view="optimized">Optimization Gallery</a>
       </div>
       <div class="sidebar-footer">
         <div class="user-email" id="user-email"></div>
@@ -229,6 +232,31 @@
             <button class="btn ghost small" id="chunk-next" type="button">Next ›</button>
           </div>
         </div>
+      </div>
+
+      <!-- Users tree view -->
+      <div id="view-users" class="hidden">
+        <div class="toolbar">
+          <button class="btn ghost small hidden" id="users-back" type="button">← Back</button>
+          <h1 id="users-title">Users</h1>
+          <div class="spacer"></div>
+          <input id="users-search" class="input" style="max-width:240px;" placeholder="Search users…" />
+        </div>
+        <div id="users-body"></div>
+      </div>
+
+      <!-- Optimization gallery view -->
+      <div id="view-optimized" class="hidden">
+        <div class="toolbar">
+          <h1>Optimization Gallery</h1>
+          <span class="toolbar-note" id="optgal-note"></span>
+          <div class="spacer"></div>
+          <button class="btn ghost small" id="optgal-refresh" type="button">Refresh</button>
+        </div>
+        <h3 style="margin-top:4px;">Completed Jobs</h3>
+        <div id="optgal-jobs" class="gallery media-gallery mt-12"></div>
+        <h3 class="mt-20">Frame-Optimization Batches</h3>
+        <div id="optgal-batches" class="mt-12"></div>
       </div>
     </main>
   </div>

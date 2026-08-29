@@ -19,7 +19,7 @@ import {
 import { insertOptBatch, latestCompletedBatch, listFramesByIds, getOptBatch } from "../db/opt";
 import { PRESETS } from "../types";
 import type { Frame, JwtUser, Chunk, ExportKind } from "../types";
-import { r2Keys, userSegmentFromKey } from "../lib/r2";
+import { r2Keys, userSegmentFromKey, folderSegmentFromKey } from "../lib/r2";
 import type { ImageFormat } from "../lib/r2";
 import { deleteJobCompletely } from "../lib/cleanup";
 
@@ -234,6 +234,7 @@ jobs.get("/:id/frames", requireAdmin, async (c) => {
 
   const host = getR2Host(c.env.R2_ENDPOINT, c.env.R2_BUCKET_NAME);
   const seg = userSegmentFromKey(job.r2_video_key);
+  const folder = folderSegmentFromKey(job.r2_video_key);
   // When the latest frame-optimize batch is complete, presign optimized URLs for
   // the frames it covered so the gallery can toggle Original / Optimized.
   const batch = await latestCompletedBatch(c.env.DB, jobId);
@@ -246,7 +247,7 @@ jobs.get("/:id/frames", requireAdmin, async (c) => {
       thumbUrl: f.deleted ? null : await presignGet(c.env.R2_ACCESS_KEY_ID, c.env.R2_SECRET_ACCESS_KEY, S3_REGION, host, thumbKeyFromFull(f.r2_key), 900),
       fullUrl: f.deleted ? null : await presignGet(c.env.R2_ACCESS_KEY_ID, c.env.R2_SECRET_ACCESS_KEY, S3_REGION, host, f.r2_key, 900),
       optimizedUrl: !f.deleted && batch && batchFormat && batchFrameIds?.has(f.id)
-        ? await presignGet(c.env.R2_ACCESS_KEY_ID, c.env.R2_SECRET_ACCESS_KEY, S3_REGION, host, r2Keys.optimizedFrame(seg, jobId, batchFormat, f.frame_number), 900)
+        ? await presignGet(c.env.R2_ACCESS_KEY_ID, c.env.R2_SECRET_ACCESS_KEY, S3_REGION, host, r2Keys.optimizedFrame(seg, folder, jobId, batchFormat, f.frame_number), 900)
         : null,
     }))
   );
@@ -386,10 +387,11 @@ async function createExport(
   return c.json({ exportId, status: "queued", kind }, 201);
 }
 
-// POST /:id/export — admin creates a ZIP of extracted frames (all or selected)
-jobs.post("/:id/export", requireAdmin, async (c) => {
+// POST /:id/export — owner-or-admin creates a ZIP of extracted frames (all or selected)
+jobs.post("/:id/export", requireAuth, async (c) => {
+  const user = c.get("user");
   const jobId = c.req.param("id");
-  const job = await getJob(c.env.DB, jobId);
+  const job = user.role === "admin" ? await getJob(c.env.DB, jobId) : await getJobForUser(c.env.DB, user.sub, jobId);
   if (!job) return c.json({ error: "Not found" }, 404);
 
   let body: Record<string, unknown>;
@@ -403,9 +405,10 @@ jobs.post("/:id/export", requireAdmin, async (c) => {
 });
 
 // POST /:id/exports — generic export creator (frames_opt = optimized frames of an opt batch)
-jobs.post("/:id/exports", requireAdmin, async (c) => {
+jobs.post("/:id/exports", requireAuth, async (c) => {
+  const user = c.get("user");
   const jobId = c.req.param("id");
-  const job = await getJob(c.env.DB, jobId);
+  const job = user.role === "admin" ? await getJob(c.env.DB, jobId) : await getJobForUser(c.env.DB, user.sub, jobId);
   if (!job) return c.json({ error: "Not found" }, 404);
 
   let body: Record<string, unknown>;
@@ -514,12 +517,13 @@ jobs.post("/:id/optimize", requireAdmin, async (c) => {
   }
 
   const seg = userSegmentFromKey(job.r2_video_key);
+  const folder = folderSegmentFromKey(job.r2_video_key);
   const optContainer = container ?? (codec === "libsvtav1" ? "webm" : "mp4");
   const optFormat = format ?? (isImage ? "webp" : null);
   const optimizedKey = isImage
-    ? r2Keys.optimizedImage(seg, jobId, optFormat!)
-    : r2Keys.optimizedVideo(seg, jobId, optContainer as "mp4" | "mkv" | "webm");
-  const thumbKey = isImage ? r2Keys.thumbImage(seg, jobId) : null;
+    ? r2Keys.optimizedImage(seg, folder, jobId, optFormat!)
+    : r2Keys.optimizedVideo(seg, folder, jobId, optContainer as "mp4" | "mkv" | "webm");
+  const thumbKey = isImage ? r2Keys.thumbImage(seg, folder, jobId) : null;
   const ok = await transitionOptimize(c.env.DB, jobId, job.optimize_status, "queued", {
     opt_crf: isImage ? null : crf,
     opt_max_dim: maxDim,
@@ -618,13 +622,19 @@ jobs.post("/:id/chunks/export", requireAdmin, async (c) => {
 });
 
 // GET /exports/:exportId — export status + presigned download URL when ready
-jobs.get("/exports/:exportId", requireAdmin, async (c) => {
+// (owner-or-admin; for folder exports the job_id points at the folder's first job)
+jobs.get("/exports/:exportId", requireAuth, async (c) => {
+  const user = c.get("user");
   const exportId = c.req.param("exportId");
   const exp = await c.env.DB
     .prepare("SELECT * FROM exports WHERE id = ?")
     .bind(exportId)
     .first<{ id: string; job_id: string; export_type: string; status: string; r2_key: string | null; file_size: number | null; error_message: string | null; frame_count: number | null; created_at: string; completed_at: string | null }>();
   if (!exp) return c.json({ error: "Not found" }, 404);
+  if (user.role !== "admin") {
+    const job = await getJobForUser(c.env.DB, user.sub, exp.job_id);
+    if (!job) return c.json({ error: "Forbidden" }, 403);
+  }
 
   let downloadUrl: string | null = null;
   if (exp.status === "completed" && exp.r2_key) {

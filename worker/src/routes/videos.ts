@@ -3,22 +3,41 @@ import type { Env } from "../env";
 import { S3_REGION } from "../env";
 import { getR2Host, presignGet } from "../lib/s3";
 import { requireAuth } from "../middleware/auth";
-import { listUserJobs } from "../db/jobs";
+import { listUserJobsFiltered } from "../db/jobs";
 import type { JwtUser } from "../types";
 
 const videos = new Hono<{ Bindings: Env; Variables: { user: JwtUser } }>();
 
-// GET /videos — current user's own jobs (never other users'). Image jobs get
-// presigned thumb/optimized URLs; video jobs get a poster + optimized URL.
+// GET /videos?folderId=&type=&page=&perPage= — current user's own jobs.
+// folderId absent => all folders ("All Media"); folderId present => only that
+// folder (empty string not accepted; frontend uses no param for the root view).
+// type = all | image | video. Each job gets a presigned originalUrl (preview /
+// download) plus thumb + optimized URLs when available.
 videos.get("/", requireAuth, async (c) => {
   const user = c.get("user");
-  const jobs = await listUserJobs(c.env.DB, user.sub);
+  const page = Math.max(1, parseInt(c.req.query("page") || "1", 10) || 1);
+  const perPage = Math.min(200, Math.max(1, parseInt(c.req.query("perPage") || "60", 10) || 60));
+  const folderRaw = c.req.query("folderId");
+  const folderId = typeof folderRaw === "string" && folderRaw.length ? folderRaw : undefined;
+  const type = c.req.query("type");
+  const mediaType = type === "image" ? "image" : type === "video" ? "video" : undefined;
+
+  const { rows, total } = await listUserJobsFiltered(c.env.DB, user.sub, {
+    folderId, // undefined => all; a real id => that folder
+    mediaType,
+    page,
+    perPage,
+  });
+
   const host = getR2Host(c.env.R2_ENDPOINT, c.env.R2_BUCKET_NAME);
-  const rows = await Promise.all(
-    jobs.map(async (j) => {
+  const jobs = await Promise.all(
+    rows.map(async (j) => {
       const isImage = j.media_type === "image";
+      const originalUrl = await presignGet(
+        c.env.R2_ACCESS_KEY_ID, c.env.R2_SECRET_ACCESS_KEY, S3_REGION, host, j.r2_video_key, 3600
+      );
       if (isImage) {
-        if (j.optimize_status !== "completed") return j;
+        if (j.optimize_status !== "completed") return { ...j, originalUrl };
         const [thumbUrl, optimizedUrl] = await Promise.all([
           j.optimized_thumb_key
             ? presignGet(c.env.R2_ACCESS_KEY_ID, c.env.R2_SECRET_ACCESS_KEY, S3_REGION, host, j.optimized_thumb_key, 900)
@@ -27,7 +46,7 @@ videos.get("/", requireAuth, async (c) => {
             ? presignGet(c.env.R2_ACCESS_KEY_ID, c.env.R2_SECRET_ACCESS_KEY, S3_REGION, host, j.optimized_key, 900)
             : null,
         ]);
-        return { ...j, thumbUrl, optimizedUrl };
+        return { ...j, originalUrl, thumbUrl, optimizedUrl };
       }
       // Video: poster thumbnail once frames are extracted, optimized URL once done.
       const [videoThumbUrl, optimizedUrl] = await Promise.all([
@@ -38,10 +57,11 @@ videos.get("/", requireAuth, async (c) => {
           ? presignGet(c.env.R2_ACCESS_KEY_ID, c.env.R2_SECRET_ACCESS_KEY, S3_REGION, host, j.optimized_key, 900)
           : null,
       ]);
-      return { ...j, videoThumbUrl, optimizedUrl };
+      return { ...j, originalUrl, videoThumbUrl, optimizedUrl };
     })
   );
-  return c.json({ jobs: rows });
+
+  return c.json({ jobs, total, page, perPage });
 });
 
 export default videos;

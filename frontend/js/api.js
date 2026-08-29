@@ -48,13 +48,31 @@ window.API = (() => {
    * Each part is PUT same-origin to /api/uploads/part/:jobId/:partNumber,
    * which forwards it into the R2 multipart upload. This avoids needing a CORS
    * policy on the R2 bucket (direct browser→R2 PUTs are blocked without one).
+   * folderId = destination folder (null = email root); sha256 = dedup hash.
+   * Failed parts retry up to 3× each.
    */
-  async function uploadVideo(file, onProgress) {
+  async function uploadVideo(file, { folderId = null, sha256 = null, onProgress } = {}) {
     const createRes = await request("/api/uploads/create", {
       method: "POST",
-      body: { filename: file.name, size: file.size, mimeType: file.type || "video/mp4" },
+      body: { filename: file.name, size: file.size, mimeType: file.type || "video/mp4", folderId, sha256 },
     });
     const { jobId, uploadId, chunkSize } = createRes;
+
+    async function putPart(partNumber, blob) {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const resp = await fetch(`/api/uploads/part/${jobId}/${partNumber}`, {
+          method: "PUT",
+          headers: { Authorization: `Bearer ${token()}`, "X-Upload-Id": uploadId },
+          body: blob,
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (resp.ok && data.etag) return data.etag;
+        if (attempt === 2) {
+          throw new Error(`Part ${partNumber} failed (${resp.status})${data.error ? `: ${data.error}` : ""}`);
+        }
+        await new Promise((r) => setTimeout(r, 700 * (attempt + 1)));
+      }
+    }
 
     const etags = [];
     let uploadedBytes = 0;
@@ -63,26 +81,57 @@ window.API = (() => {
       const start = (partNumber - 1) * chunkSize;
       const end = Math.min(start + chunkSize, file.size);
       const blob = file.slice(start, end);
-      const resp = await fetch(`/api/uploads/part/${jobId}/${partNumber}`, {
-        method: "PUT",
-        headers: { Authorization: `Bearer ${token()}`, "X-Upload-Id": uploadId },
-        body: blob,
-      });
-      const data = await resp.json().catch(() => ({}));
-      if (!resp.ok) {
-        throw new Error(`Part ${partNumber} failed (${resp.status})${data.error ? `: ${data.error}` : ""}`);
-      }
-      if (!data.etag) throw new Error(`Part ${partNumber} returned no ETag`);
-      etags.push({ partNumber, etag: data.etag });
+      const etag = await putPart(partNumber, blob);
+      etags.push({ partNumber, etag });
       uploadedBytes += blob.size;
       if (onProgress) onProgress(uploadedBytes / file.size);
     }
 
-    const complete = await request("/api/uploads/complete", {
+    return request("/api/uploads/complete", {
       method: "POST",
       body: { jobId, uploadId, parts: etags },
     });
-    return complete;
+  }
+
+  /** Dedup guard: has a byte-identical file already been uploaded to this folder? */
+  async function uploadCheck(folderId, sha256) {
+    return request("/api/uploads/check", { method: "POST", body: { folderId, sha256 } });
+  }
+
+  /** User gallery listing with folder + media-type filter and pagination. */
+  async function listVideos({ folderId, type = "all", page = 1, perPage = 60 } = {}) {
+    const q = new URLSearchParams({ type, page: String(page), perPage: String(perPage) });
+    if (folderId) q.set("folderId", folderId);
+    return request(`/api/videos?${q.toString()}`);
+  }
+
+  // ── Folders ────────────────────────────────────────────────────────────
+  async function listFolders() {
+    return request("/api/folders");
+  }
+  async function createFolder(name, parentId = null) {
+    return request("/api/folders", { method: "POST", body: { name, parentId } });
+  }
+  async function updateFolder(id, data) {
+    return request(`/api/folders/${id}`, { method: "PATCH", body: data });
+  }
+  async function deleteFolder(id) {
+    return request(`/api/folders/${id}`, { method: "DELETE" });
+  }
+  async function folderExport(folderId) {
+    return request(`/api/folders/${folderId}/export`, { method: "POST", body: {} });
+  }
+
+  // ── Exports ────────────────────────────────────────────────────────────
+  async function jobExport(jobId, ids = null) {
+    const body = ids && ids.length ? { type: "selected", ids } : { type: "all" };
+    return request(`/api/jobs/${jobId}/export`, { method: "POST", body });
+  }
+  async function exportStatus(exportId) {
+    return request(`/api/jobs/exports/${exportId}`);
+  }
+  async function deleteJob(id) {
+    return request(`/api/jobs/${id}`, { method: "DELETE" });
   }
 
   /** Bulk-optimize many jobs to any format (admin). */
@@ -122,7 +171,9 @@ window.API = (() => {
   }
 
   return {
-    request, login, register, logout, uploadVideo, optimizeBatch, framesOptimize,
+    request, login, register, logout, uploadVideo, uploadCheck,
+    listVideos, listFolders, createFolder, updateFolder, deleteFolder, folderExport,
+    jobExport, exportStatus, deleteJob, optimizeBatch, framesOptimize,
     token, setToken, clearToken, getUser, setUser,
     fmtBytes, fmtDuration, fmtTimestamp, statusLabel,
   };

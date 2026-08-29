@@ -917,6 +917,228 @@
     return d.innerHTML;
   }
 
+  // ── Users + Optimization Gallery views ────────────────────
+  document.querySelectorAll(".nav a[data-view]").forEach((a) => {
+    a.addEventListener("click", (e) => {
+      e.preventDefault();
+      stopAllTimers();
+      state.job = null;
+      document.querySelectorAll(".nav a").forEach((x) => x.classList.remove("active"));
+      a.classList.add("active");
+      $("view-job").classList.add("hidden");
+      $("view-videos").classList.add("hidden");
+      $("view-users").classList.add("hidden");
+      $("view-optimized").classList.add("hidden");
+      if (a.dataset.view === "users") { $("view-users").classList.remove("hidden"); loadUsers(); }
+      else { $("view-optimized").classList.remove("hidden"); loadOptimized(); }
+    });
+  });
+
+  // ── Users tree ────────────────────────────────────────────
+  let usersState = { userId: null, folderId: null, search: "" };
+  $("users-search").addEventListener("input", () => {
+    usersState.search = $("users-search").value.trim().toLowerCase();
+    if (!usersState.userId) loadUsers();
+  });
+  $("users-back").addEventListener("click", () => {
+    if (usersState.folderId) { usersState.folderId = null; loadUserFolders(usersState.userId); }
+    else { usersState.userId = null; $("users-back").classList.add("hidden"); $("users-title").textContent = "Users"; loadUsers(); }
+  });
+
+  async function loadUsers() {
+    const body = $("users-body");
+    body.innerHTML = `<div class="empty-state"><div class="empty-icon">👥</div><div>Loading users…</div></div>`;
+    try {
+      const data = await API.request("/api/admin/users");
+      const users = (data.users || []).filter((u) => !usersState.search || (u.email || "").toLowerCase().includes(usersState.search));
+      if (!users.length) {
+        body.innerHTML = `<div class="empty-state"><div class="empty-icon">👥</div><div>No users.</div></div>`;
+        return;
+      }
+      body.innerHTML = `<div class="table-wrap table-scroll"><table>
+        <thead><tr><th>Email</th><th>Role</th><th>Folders</th><th>Files</th><th>Size</th></tr></thead>
+        <tbody>${users.map((u) => `
+          <tr class="clickable" data-uid="${esc(u.id)}">
+            <td>${esc(u.email)}</td><td>${esc(u.role)}</td>
+            <td>${u.folder_count ?? 0}</td><td>${u.file_count ?? 0}</td><td>${API.fmtBytes(u.total_size)}</td>
+          </tr>`).join("")}</tbody></table></div>`;
+      body.querySelectorAll("tr.clickable").forEach((tr) => tr.addEventListener("click", () => loadUserFolders(tr.dataset.uid)));
+    } catch (err) { if (err.status === 401) { API.logout(); showAuth(); } else body.innerHTML = `<div class="auth-err">${esc(err.message)}</div>`; }
+  }
+
+  async function loadUserFolders(userId) {
+    usersState.userId = userId;
+    usersState.folderId = null;
+    $("users-back").classList.remove("hidden");
+    const body = $("users-body");
+    body.innerHTML = `<div class="empty-state"><div class="empty-icon">📂</div><div>Loading folders…</div></div>`;
+    try {
+      const [uRes, fRes] = await Promise.all([
+        API.request("/api/admin/users"),
+        API.request(`/api/admin/folders?userId=${encodeURIComponent(userId)}`),
+      ]);
+      const u = (uRes.users || []).find((x) => x.id === userId);
+      $("users-title").textContent = `${u ? u.email : "User"} — folders`;
+      const folders = fRes.folders || [];
+      const rootCount = (u && u.file_count) || 0;
+      if (!folders.length && !rootCount) {
+        body.innerHTML = `<div class="empty-state"><div class="empty-icon">📂</div><div>No folders for this user.</div></div>`;
+        return;
+      }
+      const rows = [];
+      if (u && rootCount) rows.push(`<tr class="clickable" data-root="1"><td>📁 <b>root</b></td><td>—</td><td>${rootCount}</td><td>${API.fmtBytes(u.total_size)}</td></tr>`);
+      rows.push(...folders.map((f) => `
+        <tr class="clickable" data-root="0" data-fid="${esc(f.id)}">
+          <td>📁 <b>${esc(f.name)}</b></td><td>${esc(f.parent_id || "root")}</td>
+          <td>${f.file_count ?? 0}</td><td>${API.fmtBytes(f.size)}</td>
+        </tr>`));
+      body.innerHTML = `<div class="table-wrap table-scroll"><table>
+        <thead><tr><th>Folder</th><th>Parent</th><th>Files</th><th>Size</th></tr></thead>
+        <tbody>${rows.join("")}</tbody></table></div>`;
+      body.querySelectorAll("tr.clickable").forEach((tr) => tr.addEventListener("click", () => {
+        if (tr.dataset.root === "1") loadUserFolderFiles(userId, null);
+        else loadUserFolderFiles(userId, tr.dataset.fid);
+      }));
+    } catch (err) { if (err.status === 401) { API.logout(); showAuth(); } else body.innerHTML = `<div class="auth-err">${esc(err.message)}</div>`; }
+  }
+
+  let adminSel = new Set();
+  async function loadUserFolderFiles(userId, folderId) {
+    usersState.folderId = folderId;
+    adminSel.clear();
+    const body = $("users-body");
+    body.innerHTML = `<div class="empty-state"><div class="empty-icon">🖼️</div><div>Loading files…</div></div>`;
+    try {
+      const data = await API.listVideos({ folderId, page: 1, perPage: 200 });
+      const files = data.jobs || [];
+      $("users-title").textContent = folderId ? "Folder files" : "Root files";
+      if (!files.length) {
+        body.innerHTML = `<div class="empty-state"><div class="empty-icon">🖼️</div><div>No files here.</div></div>`;
+        return;
+      }
+      body.innerHTML = `
+        <div class="selection-bar">
+          <span id="admin-sel-count">0 selected</span>
+          <div class="spacer"></div>
+          <button class="btn ghost small" id="admin-sel-all" type="button">Select all</button>
+          <button class="btn ghost small" id="admin-sel-none" type="button">Deselect</button>
+          <button class="btn small" id="admin-sel-opt" type="button">Optimize Selected</button>
+          <button class="btn small danger" id="admin-sel-del" type="button">Delete Selected</button>
+        </div>
+        <div class="gallery media-gallery" id="admin-files"></div>`;
+      const grid = $("admin-files");
+      for (const j of files) {
+        const isImage = j.media_type === "image";
+        const thumb = isImage ? (j.thumbUrl || "") : (j.videoThumbUrl || "");
+        const card = document.createElement("div");
+        card.className = "media-card";
+        card.innerHTML = `
+          <label class="media-check"><input type="checkbox" data-check="${j.id}" /></label>
+          <div class="media-thumb">${thumb ? `<img src="${thumb}" alt="" loading="lazy" />` : `<div class="media-thumb-fallback">${isImage ? "🖼️" : "🎬"}</div>`}</div>
+          <div class="media-info">
+            <div class="media-name" title="${esc(j.original_filename)}">${esc(j.original_filename)}</div>
+            <div class="media-meta">${API.fmtBytes(j.file_size)} · ${isImage ? "image" : "video"} · ${esc(j.status)}</div>
+          </div>`;
+        grid.appendChild(card);
+      }
+      grid.querySelectorAll("input[data-check]").forEach((box) => box.addEventListener("change", () => {
+        if (box.checked) adminSel.add(box.dataset.check); else adminSel.delete(box.dataset.check);
+        box.closest(".media-card").classList.toggle("selected", box.checked);
+        $("admin-sel-count").textContent = `${adminSel.size} selected`;
+      }));
+      $("admin-sel-all").addEventListener("click", () => { files.forEach((f) => adminSel.add(f.id)); renderAdminSel(files); });
+      $("admin-sel-none").addEventListener("click", () => { adminSel.clear(); renderAdminSel(files); });
+      $("admin-sel-opt").addEventListener("click", () => {
+        if (!adminSel.size) return toast("Select files first.", "err");
+        openOptimizeModal("bulk", [...adminSel]);
+      });
+      $("admin-sel-del").addEventListener("click", async () => {
+        if (!adminSel.size) return toast("Select files first.", "err");
+        if (!confirm(`Delete ${adminSel.size} file(s) permanently?`)) return;
+        for (const id of [...adminSel]) await API.request(`/api/admin/jobs/${id}`, { method: "DELETE" });
+        toast("Deleted.", "ok");
+        loadUserFolderFiles(userId, folderId);
+      });
+    } catch (err) { if (err.status === 401) { API.logout(); showAuth(); } else body.innerHTML = `<div class="auth-err">${esc(err.message)}</div>`; }
+  }
+
+  function renderAdminSel(files) {
+    const grid = $("admin-files");
+    if (grid) grid.querySelectorAll("input[data-check]").forEach((box) => {
+      box.checked = adminSel.has(box.dataset.check);
+      box.closest(".media-card").classList.toggle("selected", box.checked);
+    });
+    const c = $("admin-sel-count");
+    if (c) c.textContent = `${adminSel.size} selected`;
+  }
+
+  // ── Optimization gallery ──────────────────────────────────
+  $("optgal-refresh").addEventListener("click", loadOptimized);
+  async function loadOptimized() {
+    const jobsEl = $("optgal-jobs");
+    const batchesEl = $("optgal-batches");
+    jobsEl.innerHTML = `<div class="empty-state"><div class="empty-icon">⚡</div><div>Loading…</div></div>`;
+    batchesEl.innerHTML = "";
+    try {
+      const data = await API.request("/api/admin/optimized");
+      const jobs = data.jobs || [];
+      const batches = data.batches || [];
+      $("optgal-note").textContent = `${jobs.length} optimized · ${batches.length} batches`;
+      jobsEl.innerHTML = "";
+      if (!jobs.length) {
+        jobsEl.innerHTML = `<div class="empty-state"><div class="empty-icon">⚡</div><div>No completed optimizations yet.</div></div>`;
+      } else {
+        for (const j of jobs) {
+          const isImage = j.media_type === "image";
+          const fmt = isImage ? (j.opt_format || "webp") : `${j.opt_container || "mp4"}/${j.opt_codec || "h264"}`;
+          const card = document.createElement("div");
+          card.className = "media-card";
+          card.innerHTML = `
+            <div class="media-thumb">${j.thumbUrl ? `<img src="${j.thumbUrl}" alt="" loading="lazy" />` : `<div class="media-thumb-fallback">${isImage ? "🖼️" : "🎬"}</div>`}</div>
+            <div class="media-info">
+              <div class="media-name" title="${esc(j.original_filename)}">${esc(j.original_filename)}</div>
+              <div class="media-meta">${esc(j.user_email)}</div>
+              <div class="media-meta">${API.fmtBytes(j.file_size)} → ${API.fmtBytes(j.optimized_size)} · ${esc(fmt)}</div>
+              ${j.savedPct != null ? `<div class="saved-pct">${j.savedPct}% saved</div>` : ""}
+            </div>
+            <div class="media-actions">
+              ${j.optimizedUrl ? `<a class="btn small" href="${j.optimizedUrl}" target="_blank" rel="noopener" download>Download</a>` : ""}
+              <button class="btn small ghost" data-preview-url="${j.optimizedUrl}" data-name="${esc(j.original_filename)}">Preview</button>
+            </div>`;
+          jobsEl.appendChild(card);
+          const pv = card.querySelector("[data-preview-url]");
+          if (pv) pv.addEventListener("click", () => adminPreview(pv.dataset.previewUrl, pv.dataset.name, isImage));
+        }
+      }
+      batchesEl.innerHTML = "";
+      if (!batches.length) {
+        batchesEl.innerHTML = `<div class="empty-state"><div class="empty-icon">🖼️</div><div>No frame-optimization batches yet.</div></div>`;
+      } else {
+        for (const b of batches) {
+          const el = document.createElement("div");
+          el.className = "batch-row";
+          el.innerHTML = `
+            <span class="badge ${esc(b.status)}">${esc(b.status)}</span>
+            <span class="grow">${esc(b.original_filename || b.job_id)}</span>
+            <span class="muted">${esc(b.format)} · ${b.processed}/${b.total}</span>`;
+          batchesEl.appendChild(el);
+        }
+      }
+    } catch (err) { if (err.status === 401) { API.logout(); showAuth(); } else jobsEl.innerHTML = `<div class="auth-err">${esc(err.message)}</div>`; }
+  }
+
+  function adminPreview(url, name, isImage) {
+    if (!url) return toast("No output URL yet.", "err");
+    const modal = $("preview-modal");
+    $("preview-title").textContent = name || "Preview";
+    const img = $("preview-img");
+    img.onclick = null;
+    img.src = url;
+    $("preview-pager").classList.add("hidden");
+    $("preview-download").href = url;
+    modal.classList.remove("hidden");
+  }
+
   // ── Init ──────────────────────────────────────────────────
   if (API.token()) {
     const u = API.getUser();

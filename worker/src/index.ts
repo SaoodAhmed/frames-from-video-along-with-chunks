@@ -7,6 +7,7 @@ import uploadRoutes from "./routes/uploads";
 import jobRoutes from "./routes/jobs";
 import adminRoutes from "./routes/admin";
 import videoRoutes from "./routes/videos";
+import folderRoutes from "./routes/folders";
 import processorRoutes from "./routes/processor";
 
 const app = new Hono<{ Bindings: Env }>();
@@ -21,7 +22,7 @@ app.use(
   "*",
   cors({
     origin: "*",
-    allowMethods: ["GET", "POST", "DELETE", "OPTIONS"],
+    allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allowHeaders: ["Content-Type", "Authorization"],
     maxAge: 86400,
   })
@@ -61,6 +62,7 @@ app.route("/api/uploads", uploadRoutes);
 app.route("/api/jobs", jobRoutes);
 app.route("/api/admin", adminRoutes);
 app.route("/api/videos", videoRoutes);
+app.route("/api/folders", folderRoutes);
 app.route("/api/processor", processorRoutes);
 
 app.get("/api/health", (c) => c.json({ ok: true, service: "frameforge", time: new Date().toISOString() }));

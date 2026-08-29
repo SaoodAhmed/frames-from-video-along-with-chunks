@@ -16,7 +16,7 @@ export type OptimizeStatus = "none" | "queued" | "processing" | "completed" | "f
 
 /** What an export ZIP bundles: extracted frames, scene-based chunk videos,
  * or optimized (re-encoded) frames. */
-export type ExportKind = "frames" | "chunks" | "frames_opt";
+export type ExportKind = "frames" | "chunks" | "frames_opt" | "folder";
 
 export type MediaType = "video" | "image";
 
@@ -31,6 +31,8 @@ export interface User {
 export interface Job {
   id: string;
   user_id: string;
+  folder_id: string | null;
+  sha256: string | null;
   original_filename: string;
   r2_video_key: string;
   file_size: number;

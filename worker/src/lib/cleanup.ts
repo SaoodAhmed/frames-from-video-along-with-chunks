@@ -1,6 +1,6 @@
 import type { Env } from "../env";
 import { listFramesByIds } from "../db/opt";
-import { r2Keys, userSegmentFromKey } from "./r2";
+import { r2Keys, userSegmentFromKey, folderSegmentFromKey } from "./r2";
 import type { ImageFormat } from "./r2";
 
 interface CleanupJobRow {
@@ -17,6 +17,7 @@ export async function deleteJobCompletely(env: Env, jobId: string): Promise<bool
   const job = await env.DB.prepare("SELECT * FROM jobs WHERE id = ?").bind(jobId).first<CleanupJobRow>();
   if (!job) return false;
   const seg = userSegmentFromKey(job.r2_video_key);
+  const folder = folderSegmentFromKey(job.r2_video_key);
 
   const frames = await env.DB.prepare("SELECT r2_key FROM frames WHERE job_id = ?").bind(jobId).all<{ r2_key: string }>();
   for (const f of frames.results ?? []) {
@@ -34,7 +35,7 @@ export async function deleteJobCompletely(env: Env, jobId: string): Promise<bool
     const ids = JSON.parse(b.frame_ids) as string[];
     const fr = await listFramesByIds(env.DB, jobId, ids);
     const fmt = b.format as ImageFormat;
-    for (const f of fr) await Promise.allSettled([env.R2.delete(r2Keys.optimizedFrame(seg, jobId, fmt, f.frame_number))]);
+    for (const f of fr) await Promise.allSettled([env.R2.delete(r2Keys.optimizedFrame(seg, folder, jobId, fmt, f.frame_number))]);
   }
 
   const chunks = await env.DB.prepare("SELECT r2_key FROM chunks WHERE job_id = ?").bind(jobId).all<{ r2_key: string }>();
