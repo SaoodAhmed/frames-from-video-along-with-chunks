@@ -52,45 +52,35 @@
 
     <main class="main">
       <div class="toolbar">
-        <h1>My Videos</h1>
+        <h1>My Media</h1>
         <span class="toolbar-note" id="library-note">—</span>
         <div class="spacer"></div>
-        <button class="btn" id="btn-upload" type="button">+ Upload Video</button>
+        <input id="gallery-search" class="input search-box" type="text" placeholder="Search media…" />
+        <button class="btn" id="btn-upload" type="button">+ Upload</button>
       </div>
 
       <!-- Upload panel -->
       <div id="upload-panel" class="card hidden mb-20">
+        <div class="upload-actions">
+          <label class="btn ghost" for="file-input">Upload Files</label>
+          <label class="btn ghost" for="folder-input">Upload Folder</label>
+        </div>
+        <input id="file-input" type="file" class="hidden" multiple accept="video/*,.mp4,.mov,.m4v,.avi,.mkv,.webm,.ogv,.ogg,.3gp,.3g2,.flv,.wmv,.mpg,.mpeg,.ts,.m2ts,.mts,.mxf,.mp2,.ogm,.divx,.asf,.vob,.m2v,.mpe,image/*,.jpg,.jpeg,.png,.webp,.avif,.gif,.bmp,.tiff,.tif,.heic,.heif" />
+        <input id="folder-input" type="file" class="hidden" multiple webkitdirectory />
         <div id="dropzone" class="dropzone">
-          <div class="dz-title">Drag &amp; Drop videos here</div>
-          <div class="dz-sub">or click to Browse · any video format, multiple files</div>
-          <input id="file-input" type="file" class="hidden" multiple accept="video/*,.mp4,.mov,.m4v,.avi,.mkv,.webm,.ogv,.ogg,.3gp,.3g2,.flv,.wmv,.mpg,.mpeg,.ts,.m2ts,.mts,.mxf,.mp2,.ogm,.divx,.asf,.vob,.m2v,.mpe" />
+          <div class="dz-title">Drag &amp; Drop files or a whole folder here</div>
+          <div class="dz-sub">images + videos · multiple files or a media folder</div>
         </div>
         <div id="upload-batch" class="hidden mt-12"></div>
         <div class="auth-err" id="upload-err"></div>
       </div>
 
       <div id="videos-empty" class="empty-state">
-        <div class="empty-icon">🎞️</div>
-        <div>No videos yet. Upload a video and it will appear here, waiting for processing.</div>
-        <div class="empty-cta"><button class="btn" id="empty-upload" type="button">+ Upload your first video</button></div>
+        <div class="empty-icon">🗂️</div>
+        <div>No media yet. Upload files or a folder and they'll appear here.</div>
+        <div class="empty-cta"><button class="btn" id="empty-upload" type="button">+ Upload your first media</button></div>
       </div>
-      <div id="videos-table" class="table-wrap table-scroll hidden">
-        <table>
-          <thead>
-            <tr>
-              <th>Filename</th>
-              <th>Size</th>
-              <th>Duration</th>
-              <th>Uploaded</th>
-              <th>Frames</th>
-              <th>Chunks</th>
-              <th>Status</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody id="videos-body"></tbody>
-        </table>
-      </div>
+      <div id="gallery" class="gallery media-gallery hidden"></div>
     </main>
   </div>
 

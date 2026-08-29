@@ -14,8 +14,9 @@ export type ChunkStatus = "none" | "queued" | "processing" | "completed" | "fail
 /** Independent optimization state (H.264 compress for videos / resize+WebP-JPEG for images). */
 export type OptimizeStatus = "none" | "queued" | "processing" | "completed" | "failed" | "cancelled";
 
-/** What an export ZIP bundles: extracted frames or scene-based chunk videos. */
-export type ExportKind = "frames" | "chunks";
+/** What an export ZIP bundles: extracted frames, scene-based chunk videos,
+ * or optimized (re-encoded) frames. */
+export type ExportKind = "frames" | "chunks" | "frames_opt";
 
 export type MediaType = "video" | "image";
 
@@ -56,11 +57,34 @@ export interface Job {
   optimize_status: OptimizeStatus;
   opt_crf: number | null;
   opt_max_dim: number | null;
+  opt_quality: number | null;
+  opt_codec: string | null;
+  opt_container: string | null;
   optimized_key: string | null;
   optimized_size: number | null;
   optimized_duration: number | null;
   optimized_thumb_key: string | null;
   opt_format: string | null;
+  video_thumb_key: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+}
+
+export type OptBatchStatus = "queued" | "processing" | "completed" | "failed" | "cancelled";
+
+/** A batch of frame images queued for manual optimization to a chosen format. */
+export interface OptBatch {
+  id: string;
+  job_id: string;
+  format: string;
+  max_dim: number | null;
+  quality: number;
+  status: OptBatchStatus;
+  total: number;
+  processed: number;
+  frame_ids: string; // JSON array of frames.id
+  error_message: string | null;
   created_at: string;
   updated_at: string;
   completed_at: string | null;
@@ -101,29 +125,7 @@ export interface JwtUser {
   role: Role;
 }
 
-// R2 key layout
-export const r2Keys = {
-  originalVideo: (userId: string, jobId: string, filename: string) =>
-    `users/${userId}/videos/${jobId}/original/${filename}`,
-  optimizedVideo: (userId: string, jobId: string) =>
-    `users/${userId}/videos/${jobId}/optimized/optimized.mp4`,
-  originalImage: (userId: string, jobId: string, filename: string) =>
-    `users/${userId}/images/${jobId}/original/${filename}`,
-  optimizedImage: (userId: string, jobId: string) =>
-    `users/${userId}/images/${jobId}/optimized/optimized.webp`,
-  thumbImage: (userId: string, jobId: string) =>
-    `users/${userId}/images/${jobId}/thumb.jpg`,
-  fullFrame: (userId: string, jobId: string, n: number) =>
-    `users/${userId}/jobs/${jobId}/frames/full/frame_${String(n).padStart(4, "0")}.jpg`,
-  thumbFrame: (userId: string, jobId: string, n: number) =>
-    `users/${userId}/jobs/${jobId}/frames/thumbs/frame_${String(n).padStart(4, "0")}.jpg`,
-  chunkVideo: (userId: string, jobId: string, n: number) =>
-    `users/${userId}/jobs/${jobId}/chunks/chunk_${String(n).padStart(4, "0")}.mp4`,
-  exportAll: (userId: string, jobId: string, kind: ExportKind = "frames") =>
-    `users/${userId}/jobs/${jobId}/exports/${kind}_all.zip`,
-  exportSelected: (userId: string, jobId: string, kind: ExportKind = "frames") =>
-    `users/${userId}/jobs/${jobId}/exports/${kind}_selected.zip`,
-};
+// R2 key layout lives in lib/r2.ts (see `r2Keys`); the layout must match processor/config.py.
 
 // Chunk state machine — allowed transitions
 export const CHUNK_TRANSITIONS: Record<ChunkStatus, ChunkStatus[]> = {

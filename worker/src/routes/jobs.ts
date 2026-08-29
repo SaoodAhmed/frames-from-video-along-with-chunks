@@ -16,8 +16,12 @@ import {
   deleteChunkRows,
   deleteChunkExports,
 } from "../db/jobs";
-import { PRESETS, r2Keys } from "../types";
+import { insertOptBatch, latestCompletedBatch, listFramesByIds } from "../db/opt";
+import { PRESETS } from "../types";
 import type { Frame, JwtUser, Chunk, ExportKind } from "../types";
+import { r2Keys, userSegmentFromKey } from "../lib/r2";
+import type { ImageFormat } from "../lib/r2";
+import { deleteJobCompletely } from "../lib/cleanup";
 
 const jobs = new Hono<{ Bindings: Env; Variables: { user: JwtUser } }>();
 
@@ -54,7 +58,7 @@ async function triggerProcessor(
  * Notify whatever processor is available: the legacy Modal webhook if configured
  * AND the GitHub Actions runner (24/7, no laptop). Both are fire-and-forget.
  */
-async function notifyProcessors(
+export async function notifyProcessors(
   c: { env: Env; executionCtx?: { waitUntil: (p: Promise<unknown>) => void } },
   payload: DispatchPayload
 ): Promise<void> {
@@ -82,7 +86,20 @@ jobs.get("/:id", requireAuth, async (c) => {
     job.optimize_status === "completed" && job.optimized_thumb_key
       ? await presignGet(c.env.R2_ACCESS_KEY_ID, c.env.R2_SECRET_ACCESS_KEY, S3_REGION, host, job.optimized_thumb_key, 900)
       : null;
-  return c.json({ job, videoUrl, optimizedUrl, thumbUrl });
+  const videoThumbUrl = job.video_thumb_key
+    ? await presignGet(c.env.R2_ACCESS_KEY_ID, c.env.R2_SECRET_ACCESS_KEY, S3_REGION, host, job.video_thumb_key, 900)
+    : null;
+  return c.json({ job, videoUrl, optimizedUrl, thumbUrl, videoThumbUrl });
+});
+
+// DELETE /:id — owner or admin permanently deletes the job and its R2 objects
+jobs.delete("/:id", requireAuth, async (c) => {
+  const user = c.get("user");
+  const jobId = c.req.param("id");
+  const job = user.role === "admin" ? await getJob(c.env.DB, jobId) : await getJobForUser(c.env.DB, user.sub, jobId);
+  if (!job) return c.json({ error: "Not found" }, 404);
+  await deleteJobCompletely(c.env, jobId);
+  return c.json({ ok: true, deleted: jobId });
 });
 
 // POST /:id/process — admin starts processing (uploaded/failed/cancelled -> queued)
@@ -216,15 +233,32 @@ jobs.get("/:id/frames", requireAdmin, async (c) => {
     .all<Frame>();
 
   const host = getR2Host(c.env.R2_ENDPOINT, c.env.R2_BUCKET_NAME);
+  const seg = userSegmentFromKey(job.r2_video_key);
+  // When the latest frame-optimize batch is complete, presign optimized URLs for
+  // the frames it covered so the gallery can toggle Original / Optimized.
+  const batch = await latestCompletedBatch(c.env.DB, jobId);
+  const batchFrameIds = batch ? new Set(JSON.parse(batch.frame_ids) as string[]) : null;
+  const batchFormat = batch?.format as ImageFormat | undefined;
+
   const frames = await Promise.all(
     (rows.results ?? []).map(async (f) => ({
       ...f,
       thumbUrl: f.deleted ? null : await presignGet(c.env.R2_ACCESS_KEY_ID, c.env.R2_SECRET_ACCESS_KEY, S3_REGION, host, thumbKeyFromFull(f.r2_key), 900),
       fullUrl: f.deleted ? null : await presignGet(c.env.R2_ACCESS_KEY_ID, c.env.R2_SECRET_ACCESS_KEY, S3_REGION, host, f.r2_key, 900),
+      optimizedUrl: !f.deleted && batch && batchFormat && batchFrameIds?.has(f.id)
+        ? await presignGet(c.env.R2_ACCESS_KEY_ID, c.env.R2_SECRET_ACCESS_KEY, S3_REGION, host, r2Keys.optimizedFrame(seg, jobId, batchFormat, f.frame_number), 900)
+        : null,
     }))
   );
 
-  return c.json({ job, frames, total: count?.n ?? 0, page, perPage });
+  return c.json({
+    job,
+    frames,
+    total: count?.n ?? 0,
+    page,
+    perPage,
+    optBatch: batch ? { id: batch.id, format: batch.format, status: batch.status, total: batch.total, processed: batch.processed } : null,
+  });
 });
 
 // POST /:id/frames/delete — admin deletes selected frames (soft delete + R2 cleanup)
@@ -274,6 +308,49 @@ jobs.post("/:id/frames/delete", requireAdmin, async (c) => {
   return c.json({ ok: true, deleted: framesToDelete.length });
 });
 
+// POST /:id/frames/optimize — admin selects frame images and converts them to a
+// chosen format/quality/maxDim. Creates an opt_batch row the runner drains.
+jobs.post("/:id/frames/optimize", requireAdmin, async (c) => {
+  const jobId = c.req.param("id");
+  const job = await getJob(c.env.DB, jobId);
+  if (!job) return c.json({ error: "Not found" }, 404);
+
+  let body: Record<string, unknown>;
+  try {
+    body = await c.req.json();
+  } catch {
+    body = {};
+  }
+  const frameIds = Array.isArray(body.frameIds) ? body.frameIds.filter((x): x is string => typeof x === "string") : [];
+  if (frameIds.length === 0) return c.json({ error: "frameIds required" }, 400);
+
+  const formatRaw = typeof body.format === "string" ? body.format.toLowerCase() : "webp";
+  const format: ImageFormat = ["webp", "jpeg", "avif", "png"].includes(formatRaw) ? (formatRaw as ImageFormat) : "webp";
+  const quality =
+    typeof body.quality === "number" && Number.isFinite(body.quality)
+      ? Math.min(100, Math.max(1, Math.round(body.quality)))
+      : 85;
+  const maxDim =
+    typeof body.maxDim === "number" && Number.isFinite(body.maxDim) && body.maxDim > 0
+      ? Math.round(body.maxDim)
+      : null;
+
+  const frames = await listFramesByIds(c.env.DB, jobId, frameIds);
+  if (frames.length === 0) return c.json({ error: "No matching frames for this job" }, 400);
+
+  const batchId = crypto.randomUUID();
+  await insertOptBatch(c.env.DB, {
+    id: batchId,
+    job_id: jobId,
+    format,
+    max_dim: maxDim,
+    quality,
+    frame_ids: frames.map((f) => f.id),
+  });
+  await notifyProcessors(c, { jobId, batchId, action: "frameopt" });
+  return c.json({ batchId, status: "queued", total: frames.length }, 201);
+});
+
 async function createExport(
   c: { env: Env; json: (data: unknown, status?: number) => Response },
   jobId: string,
@@ -297,11 +374,12 @@ async function createExport(
   const exportId = crypto.randomUUID();
   const now = new Date().toISOString();
   const idCol = kind === "chunks" ? "chunk_ids" : "frame_ids";
+  const batchId = kind === "frames_opt" && typeof body.batchId === "string" ? body.batchId : null;
   await c.env.DB.prepare(
-    `INSERT INTO exports (id, job_id, export_type, kind, status, ${idCol}, created_at, updated_at)
-     VALUES (?, ?, ?, ?, 'queued', ?, ?, ?)`
+    `INSERT INTO exports (id, job_id, export_type, kind, status, ${idCol}, batch_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?)`
   )
-    .bind(exportId, jobId, type, kind, type === "selected" ? JSON.stringify(ids) : null, now, now)
+    .bind(exportId, jobId, type, kind, type === "selected" ? JSON.stringify(ids) : null, batchId, now, now)
     .run();
 
   await notifyProcessors(c, { jobId, action: "export", exportId });
@@ -322,6 +400,25 @@ jobs.post("/:id/export", requireAdmin, async (c) => {
   }
   if (body.ids) body.frameIds = body.ids; // accept both spellings
   return createExport(c, jobId, "frames", body);
+});
+
+// POST /:id/exports — generic export creator (frames_opt = optimized frames of an opt batch)
+jobs.post("/:id/exports", requireAdmin, async (c) => {
+  const jobId = c.req.param("id");
+  const job = await getJob(c.env.DB, jobId);
+  if (!job) return c.json({ error: "Not found" }, 404);
+
+  let body: Record<string, unknown>;
+  try {
+    body = await c.req.json();
+  } catch {
+    body = {};
+  }
+  const kind = body.kind === "frames_opt" ? "frames_opt" : "frames";
+  if (kind === "frames_opt" && typeof body.batchId !== "string") {
+    return c.json({ error: "batchId required for frames_opt export" }, 400);
+  }
+  return createExport(c, jobId, kind, body);
 });
 
 // ── Chunks ────────────────────────────────────────────────────────────────
@@ -360,8 +457,9 @@ jobs.post("/:id/chunk", requireAdmin, async (c) => {
   return c.json({ job: updated });
 });
 
-// POST /:id/optimize — admin triggers optimization (H.264 compress for videos).
-// CRF 23 default; maxDim unset = keep resolution. Re-running replaces the output.
+// POST /:id/optimize — admin manually optimizes a job to ANY format.
+// Video: container (mp4/mkv/webm) x codec (libx264/libsvtav1) x crf x maxDim.
+// Image:  format (webp/jpeg/avif/png) x quality x maxDim. Re-running replaces output.
 jobs.post("/:id/optimize", requireAdmin, async (c) => {
   const jobId = c.req.param("id");
   const job = await getJob(c.env.DB, jobId);
@@ -373,7 +471,27 @@ jobs.post("/:id/optimize", requireAdmin, async (c) => {
   } catch {
     body = {};
   }
-  const crf = typeof body.crf === "number" && Number.isFinite(body.crf) ? Math.min(45, Math.max(0, Math.round(body.crf))) : 23;
+
+  const isImage = job.media_type === "image";
+
+  // Image params
+  const formatRaw = typeof body.format === "string" ? body.format.toLowerCase() : null;
+  const format: ImageFormat | null =
+    isImage && formatRaw && ["webp", "jpeg", "avif", "png"].includes(formatRaw) ? (formatRaw as ImageFormat) : null;
+  const quality =
+    typeof body.quality === "number" && Number.isFinite(body.quality)
+      ? Math.min(100, Math.max(1, Math.round(body.quality)))
+      : isImage ? 85 : null;
+
+  // Video params
+  const containerRaw = typeof body.container === "string" ? body.container.toLowerCase() : null;
+  const container = !isImage && containerRaw && ["mp4", "mkv", "webm"].includes(containerRaw) ? containerRaw : null;
+  const codecRaw = typeof body.codec === "string" ? body.codec.toLowerCase() : null;
+  const codec = !isImage && codecRaw && ["libx264", "libsvtav1"].includes(codecRaw) ? codecRaw : null;
+  const crf =
+    typeof body.crf === "number" && Number.isFinite(body.crf)
+      ? Math.min(45, Math.max(0, Math.round(body.crf)))
+      : 23;
   const maxDim =
     typeof body.maxDim === "number" && Number.isFinite(body.maxDim) && body.maxDim > 0
       ? Math.round(body.maxDim)
@@ -388,17 +506,24 @@ jobs.post("/:id/optimize", requireAdmin, async (c) => {
     if (key) await Promise.allSettled([c.env.R2.delete(key)]);
   }
 
-  const isImage = job.media_type === "image";
-  const optimizedKey = isImage ? r2Keys.optimizedImage(job.user_id, jobId) : r2Keys.optimizedVideo(job.user_id, jobId);
-  const thumbKey = isImage ? r2Keys.thumbImage(job.user_id, jobId) : null;
+  const seg = userSegmentFromKey(job.r2_video_key);
+  const optContainer = container ?? (codec === "libsvtav1" ? "webm" : "mp4");
+  const optFormat = format ?? (isImage ? "webp" : null);
+  const optimizedKey = isImage
+    ? r2Keys.optimizedImage(seg, jobId, optFormat!)
+    : r2Keys.optimizedVideo(seg, jobId, optContainer as "mp4" | "mkv" | "webm");
+  const thumbKey = isImage ? r2Keys.thumbImage(seg, jobId) : null;
   const ok = await transitionOptimize(c.env.DB, jobId, job.optimize_status, "queued", {
-    opt_crf: crf,
+    opt_crf: isImage ? null : crf,
     opt_max_dim: maxDim,
+    opt_quality: isImage ? quality : null,
+    opt_codec: isImage ? null : (codec ?? "libx264"),
+    opt_container: isImage ? null : optContainer,
     optimized_key: optimizedKey,
     optimized_size: null,
     optimized_duration: null,
     optimized_thumb_key: thumbKey,
-    opt_format: null,
+    opt_format: optFormat,
     error_message: null,
   });
   if (!ok) return c.json({ error: "Cannot start optimization now" }, 409);

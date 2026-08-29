@@ -72,7 +72,14 @@ app.all("*", async (c) => {
   if (c.req.path.startsWith("/api/")) return c.json({ error: "Not Found" }, 404);
   const asset = STATIC_ASSETS[c.req.path];
   if (!asset) return c.json({ error: "Not Found" }, 404);
-  return new Response(asset.data, { headers: { "content-type": asset.contentType } });
+  return new Response(asset.data, {
+    headers: {
+      "content-type": asset.contentType,
+      // Asset URLs are content-fixed (no hashing) and change on every deploy —
+      // never let a browser or edge cache serve a stale copy.
+      "cache-control": "no-cache",
+    },
+  });
 });
 
 export default app;

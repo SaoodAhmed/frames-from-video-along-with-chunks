@@ -24,6 +24,13 @@
     exportId: null,
     exportTimer: null,
     jobTimer: null,
+    jobs: [],
+    selectedJobs: new Set(),
+    optBatch: null,
+    frameView: "original",
+    optMode: null,    // "job" | "bulk" | "frames"
+    optTargets: [],   // job ids (job/bulk) or frame ids (frames)
+    optPollTimer: null,
   };
 
   // ── Auth ──────────────────────────────────────────────────
@@ -122,7 +129,8 @@
     try {
       const data = await API.request(`/api/admin/videos?${q}`);
       state.jobsTotal = data.total;
-      renderJobs(data.jobs || []);
+      state.jobs = data.jobs || [];
+      renderJobs(state.jobs);
     } catch (err) {
       if (err.status === 401) { API.logout(); showAuth(); }
     }
@@ -136,6 +144,7 @@
     for (const j of jobs) {
       const tr = document.createElement("tr");
       tr.innerHTML = `
+        <td><input type="checkbox" class="job-check" data-id="${j.id}" ${state.selectedJobs.has(j.id) ? "checked" : ""} /></td>
         <td class="small muted">${esc(j.user_email)}</td>
         <td class="mono">${esc(j.original_filename)}</td>
         <td>${API.fmtBytes(j.file_size)}</td>
@@ -159,8 +168,33 @@
     body.querySelectorAll(".act-process").forEach((b) => b.addEventListener("click", () => openJob(b.dataset.id)));
     body.querySelectorAll(".act-retry").forEach((b) => b.addEventListener("click", () => retryJob(b.dataset.id)));
     body.querySelectorAll(".act-delete").forEach((b) => b.addEventListener("click", () => deleteJob(b.dataset.id)));
+    body.querySelectorAll(".job-check").forEach((cb) => cb.addEventListener("change", (e) => {
+      if (e.target.checked) state.selectedJobs.add(cb.dataset.id); else state.selectedJobs.delete(cb.dataset.id);
+      updateBulkBar();
+    }));
+    $("jobs-select-all").checked = jobs.length > 0 && jobs.every((j) => state.selectedJobs.has(j.id));
+    updateBulkBar();
     $("page-info").textContent = `Page ${state.jobsPage} of ${Math.max(1, Math.ceil(state.jobsTotal / state.jobsPerPage))}`;
   }
+
+  function updateBulkBar() {
+    const n = state.selectedJobs.size;
+    $("bulk-bar").classList.toggle("hidden", n === 0);
+    $("bulk-count").textContent = `${n} selected`;
+  }
+
+  $("jobs-select-all").addEventListener("change", (e) => {
+    const checked = e.target.checked;
+    for (const j of state.jobs) {
+      if (checked) state.selectedJobs.add(j.id); else state.selectedJobs.delete(j.id);
+    }
+    renderJobs(state.jobs);
+  });
+  $("bulk-clear").addEventListener("click", () => { state.selectedJobs.clear(); renderJobs(state.jobs); });
+  $("bulk-optimize").addEventListener("click", () => {
+    if (state.selectedJobs.size === 0) return;
+    openOptimizeModal("bulk", [...state.selectedJobs]);
+  });
 
   function renderChunkCell(j) {
     if (!j.chunk_status || j.chunk_status === "none") return '<span class="muted small">—</span>';
@@ -458,6 +492,7 @@
       const data = await API.request(`/api/jobs/${state.job.id}/frames?${q}`);
       state.frames = data.frames || [];
       state.framesTotal = data.total;
+      state.optBatch = data.optBatch || null;
       state.selected = new Set([...state.selected].filter((id) => state.frames.some((f) => f.id === id)));
       renderGallery();
     } catch (err) {
@@ -469,11 +504,20 @@
     $("gallery-empty").classList.toggle("hidden", state.frames.length > 0);
     $("gallery").innerHTML = "";
     $("sel-count").textContent = `${state.selected.size} selected`;
+    $("optimize-selected-frames").classList.toggle("hidden", state.selected.size === 0);
+    const batch = state.optBatch;
+    const hasOpt = batch && batch.status === "completed" && state.frames.some((f) => f.optimizedUrl);
+    $("opt-toggle").classList.toggle("hidden", !hasOpt);
+    $("opt-export-zip").classList.toggle("hidden", !hasOpt);
+    $("opt-batch-info").classList.toggle("hidden", !batch);
+    if (batch) $("opt-batch-info").textContent = `opt: ${batch.format} ${batch.processed}/${batch.total}`;
+    $("opt-toggle").textContent = state.frameView === "optimized" ? "View: Optimized" : "View: Original";
     for (const f of state.frames) {
+      const src = state.frameView === "optimized" && f.optimizedUrl ? f.optimizedUrl : f.thumbUrl;
       const card = document.createElement("div");
       card.className = "frame-card" + (state.selected.has(f.id) ? " selected" : "");
       card.innerHTML = `
-        <img src="${f.thumbUrl}" alt="frame" loading="lazy" />
+        <img src="${src}" alt="frame" loading="lazy" />
         <div class="fc-bar">
           <span>#${String(f.frame_number).padStart(4, "0")} ${API.fmtTimestamp(f.timestamp)}</span>
           <input type="checkbox" class="fc-check" ${state.selected.has(f.id) ? "checked" : ""} />
@@ -483,11 +527,40 @@
         if (e.target.checked) state.selected.add(f.id); else state.selected.delete(f.id);
         card.classList.toggle("selected", e.target.checked);
         $("sel-count").textContent = `${state.selected.size} selected`;
+        $("optimize-selected-frames").classList.toggle("hidden", state.selected.size === 0);
       });
       $("gallery").appendChild(card);
     }
     $("gal-info").textContent = `${state.frames.length} of ${state.framesTotal} frames`;
   }
+
+  $("optimize-selected-frames").addEventListener("click", () => {
+    if (state.selected.size === 0) { alert("No frames selected."); return; }
+    openOptimizeModal("frames", [...state.selected]);
+  });
+  $("opt-toggle").addEventListener("click", () => {
+    state.frameView = state.frameView === "optimized" ? "original" : "optimized";
+    renderGallery();
+  });
+  $("opt-export-zip").addEventListener("click", () => {
+    if (!state.job || !state.optBatch) return;
+    $("export-modal").classList.remove("hidden");
+    $("export-footer").style.display = "none";
+    $("export-status-row").classList.remove("hidden");
+    $("export-status-text").textContent = "Creating ZIP…";
+    $("export-err").textContent = "";
+    API.request(`/api/jobs/${state.job.id}/exports`, {
+      method: "POST",
+      body: { kind: "frames_opt", batchId: state.optBatch.id },
+    }).then((data) => {
+      state.exportId = data.exportId;
+      pollExport();
+      toast("Optimized frame ZIP export started.");
+    }).catch((err) => {
+      $("export-err").textContent = err.message;
+      $("export-status-row").classList.add("hidden");
+    });
+  });
 
   async function deleteSelectedFrames() {
     if (state.selected.size === 0) { alert("No frames selected."); return; }
@@ -544,36 +617,96 @@
     }
   }
 
-  async function optimizeJob() {
+  function optimizeJob() {
     if (!state.job) return;
     const j = state.job;
     if (["queued", "processing"].includes(j.status) || ["queued", "processing"].includes(j.chunk_status)) {
       $("job-err").textContent = "Wait for frame extraction / chunk splitting to finish before optimizing.";
       return;
     }
-    const isImage = j.media_type === "image";
-    const maxDimRaw = prompt(isImage ? "Max width (0 = keep original size):" : "Max width for the optimized video (0 = keep original resolution):", "0");
-    if (maxDimRaw === null) return;
-    const maxDim = parseInt(maxDimRaw, 10);
-    const body = {};
-    if (Number.isFinite(maxDim) && maxDim > 0) body.maxDim = maxDim;
-    if (!isImage) {
-      const crfRaw = prompt("CRF quality (0-45, lower = better quality / larger file, default 23):", "23");
-      if (crfRaw === null) return;
-      const crf = parseInt(crfRaw, 10);
-      if (!Number.isFinite(crf) || crf < 0 || crf > 45) { $("job-err").textContent = "CRF must be between 0 and 45."; return; }
-      body.crf = crf;
+    openOptimizeModal("job", [j.id]);
+  }
+
+  // ── Optimize modal (single job / bulk jobs / selected frames) ─────────────
+  function openOptimizeModal(mode, targets) {
+    state.optMode = mode;
+    state.optTargets = targets;
+    $("optimize-err").textContent = "";
+    const isImageOnly = mode === "frames" ? true : mode === "job" ? (state.job && state.job.media_type === "image") : false;
+    $("opt-fields-video").classList.toggle("hidden", isImageOnly);
+    $("opt-fields-image").classList.toggle("hidden", mode === "job" && !isImageOnly);
+    $("opt-field-maxdim").classList.remove("hidden");
+    $("optimize-title").textContent =
+      mode === "frames" ? "Optimize Selected Frames" :
+      mode === "bulk" ? `Optimize ${targets.length} Job${targets.length === 1 ? "" : "s"}` :
+      isImageOnly ? "Optimize Image" : "Optimize Video";
+    $("optimize-modal").classList.remove("hidden");
+  }
+
+  function closeOptimizeModal() { $("optimize-modal").classList.add("hidden"); }
+  $("optimize-close").addEventListener("click", closeOptimizeModal);
+
+  $("optimize-submit").addEventListener("click", async () => {
+    const maxDimRaw = $("opt-maxdim").value;
+    const maxDim = maxDimRaw ? parseInt(maxDimRaw, 10) : null;
+    const format = $("opt-format").value;
+    const quality = parseInt($("opt-quality").value, 10) || 85;
+    const container = $("opt-container").value;
+    const codec = $("opt-codec").value;
+    const crf = parseInt($("opt-crf").value, 10) || 23;
+
+    if (state.optMode === "frames") {
+      if (!state.job || state.optTargets.length === 0) return;
+      $("optimize-err").textContent = "";
+      $("optimize-submit").disabled = true;
+      try {
+        await API.framesOptimize(state.job.id, state.optTargets, { format, quality, maxDim });
+        closeOptimizeModal();
+        toast(`Optimizing ${state.optTargets.length} frame${state.optTargets.length === 1 ? "" : "s"} to ${format}.`);
+        loadFrames();
+        pollOptBatch();
+      } catch (err) {
+        $("optimize-err").textContent = err.message;
+      } finally { $("optimize-submit").disabled = false; }
+      return;
     }
-    $("job-err").textContent = "";
+
+    if (state.optMode === "bulk") {
+      $("optimize-err").textContent = "";
+      $("optimize-submit").disabled = true;
+      try {
+        const res = await API.optimizeBatch(state.optTargets, { format, quality, container, codec, crf, maxDim });
+        const skipped = (res.skipped || []).map((s) => `${s.id}: ${s.reason}`).join("; ");
+        closeOptimizeModal();
+        state.selectedJobs.clear();
+        renderJobs(state.jobs);
+        toast(res.queued.length
+          ? `Queued ${res.queued.length} job${res.queued.length === 1 ? "" : "s"} for optimization.${res.skipped.length ? ` Skipped: ${skipped}` : ""}`
+          : `Nothing queued${res.skipped.length ? ` — ${skipped}` : "."}`, res.queued.length ? "ok" : "err");
+      } catch (err) {
+        $("optimize-err").textContent = err.message;
+      } finally { $("optimize-submit").disabled = false; }
+      return;
+    }
+
+    // Single job
+    if (!state.job) return;
+    const j = state.job;
+    const body = { maxDim };
+    if (j.media_type === "image") { body.format = format; body.quality = quality; }
+    else { body.container = container; body.codec = codec; body.crf = crf; }
+    $("optimize-err").textContent = "";
+    $("optimize-submit").disabled = true;
     try {
-      const data = await API.request(`/api/jobs/${state.job.id}/optimize`, { method: "POST", body });
+      const data = await API.request(`/api/jobs/${j.id}/optimize`, { method: "POST", body });
       state.job = data.job;
       renderJob();
-      toast("Optimization started — H.264 transcode will run on the processor.");
+      closeOptimizeModal();
+      toast("Optimization started.");
     } catch (err) {
-      $("job-err").textContent = "Failed to start optimization: " + err.message;
-    }
-  }
+      $("optimize-err").textContent = err.message;
+    } finally { $("optimize-submit").disabled = false; }
+  });
 
   async function loadChunks() {
     if (!state.job) return;
@@ -747,7 +880,21 @@
     }, 3000);
   }
 
-  function stopAllTimers() { stopJobTimer(); if (state.exportTimer) { clearInterval(state.exportTimer); state.exportTimer = null; } }
+  // Refresh the gallery + opt_batch status while a frame-optimize batch runs.
+  function pollOptBatch() {
+    if (state.optPollTimer) clearInterval(state.optPollTimer);
+    state.optPollTimer = setInterval(async () => {
+      if (!state.job || !state.optBatch) { clearInterval(state.optPollTimer); state.optPollTimer = null; return; }
+      if (!["queued", "processing"].includes(state.optBatch.status)) { clearInterval(state.optPollTimer); state.optPollTimer = null; return; }
+      await loadFrames();
+    }, 4000);
+  }
+
+  function stopAllTimers() {
+    stopJobTimer();
+    if (state.exportTimer) { clearInterval(state.exportTimer); state.exportTimer = null; }
+    if (state.optPollTimer) { clearInterval(state.optPollTimer); state.optPollTimer = null; }
+  }
 
   function esc(s) {
     const d = document.createElement("div");

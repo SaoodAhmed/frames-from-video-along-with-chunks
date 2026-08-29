@@ -85,6 +85,16 @@ window.API = (() => {
     return complete;
   }
 
+  /** Bulk-optimize many jobs to any format (admin). */
+  async function optimizeBatch(jobIds, opts) {
+    return request("/api/admin/optimize-batch", { method: "POST", body: { jobIds, options: opts } });
+  }
+
+  /** Optimize selected frames of a job to a chosen format (admin). */
+  async function framesOptimize(jobId, frameIds, opts) {
+    return request(`/api/jobs/${jobId}/frames/optimize`, { method: "POST", body: { frameIds, ...opts } });
+  }
+
   function fmtBytes(n) {
     if (!n) return "0 B";
     const units = ["B", "KB", "MB", "GB", "TB"];
@@ -112,7 +122,7 @@ window.API = (() => {
   }
 
   return {
-    request, login, register, logout, uploadVideo,
+    request, login, register, logout, uploadVideo, optimizeBatch, framesOptimize,
     token, setToken, clearToken, getUser, setUser,
     fmtBytes, fmtDuration, fmtTimestamp, statusLabel,
   };

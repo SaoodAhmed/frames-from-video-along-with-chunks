@@ -2,8 +2,9 @@ import type { Env } from "../env";
 
 export interface DispatchPayload {
   jobId: string;
-  action: "process" | "chunk" | "export" | "optimize";
+  action: "process" | "chunk" | "export" | "optimize" | "frameopt";
   exportId?: string;
+  batchId?: string;
 }
 
 /**

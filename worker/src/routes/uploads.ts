@@ -5,7 +5,7 @@ import { getR2Host, presignPutPart } from "../lib/s3";
 import { requireAuth } from "../middleware/auth";
 import { createJob, getJobForUser, getJob, transitionOptimize } from "../db/jobs";
 import { triggerGitHubDispatch } from "../lib/github";
-import { r2Keys } from "../types";
+import { r2Keys } from "../lib/r2";
 import type { JwtUser } from "../types";
 
 const uploads = new Hono<{ Bindings: Env; Variables: { user: JwtUser } }>();
@@ -69,8 +69,8 @@ uploads.post("/create", requireAuth, async (c) => {
   const jobId = crypto.randomUUID();
   const r2Key =
     mediaType === "image"
-      ? r2Keys.originalImage(user.sub, jobId, filename)
-      : r2Keys.originalVideo(user.sub, jobId, filename);
+      ? r2Keys.originalImage(user.email, jobId, filename)
+      : r2Keys.originalVideo(user.email, jobId, filename);
 
   // Insert the job record first (status = uploaded).
   await createJob(c.env.DB, {
@@ -203,8 +203,10 @@ uploads.post("/complete", requireAuth, async (c) => {
     // keys are fixed here so the runner never has to compute them.
     if (job.media_type === "image") {
       const queued = await transitionOptimize(c.env.DB, jobId, "none", "queued", {
-        optimized_key: r2Keys.optimizedImage(user.sub, jobId),
-        optimized_thumb_key: r2Keys.thumbImage(user.sub, jobId),
+        optimized_key: r2Keys.optimizedImage(user.email, jobId),
+        optimized_thumb_key: r2Keys.thumbImage(user.email, jobId),
+        opt_format: "webp",
+        opt_quality: 85,
       });
       if (queued) {
         const exec = c.executionCtx;

@@ -6,8 +6,9 @@ const JOB_FIELDS = `id, user_id, original_filename, r2_video_key, file_size, mim
   media_type, status, source_fps, duration, width, height, total_source_frames, extraction_fps,
   extraction_mode, sharpness, scene_threshold, extracted_frames, processed_frames,
   error_message, chunk_status, chunk_count, chunk_processed, chunk_total, chunk_error,
-  optimize_status, opt_crf, opt_max_dim, optimized_key, optimized_size, optimized_duration,
-  optimized_thumb_key, opt_format, created_at, updated_at, completed_at`;
+  optimize_status, opt_crf, opt_max_dim, opt_quality, opt_codec, opt_container,
+  optimized_key, optimized_size, optimized_duration, optimized_thumb_key, opt_format,
+  video_thumb_key, created_at, updated_at, completed_at`;
 
 const CHUNK_FIELDS = `id, job_id, chunk_number, start_sec, end_sec, duration, r2_key,
   file_size, width, height, source_fps, deleted, created_at`;

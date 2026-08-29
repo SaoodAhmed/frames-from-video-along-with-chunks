@@ -191,6 +191,18 @@ def _optimize_filter(maxdim):
     return "scale=trunc(iw/2)*2:trunc(ih/2)*2"
 
 
+def _user_segment(job):
+    """R2 key segment for a job: the email (new uploads) or legacy uid. Always
+    derived from the stored r2_video_key (`users/{segment}/jobs/...`) so old and
+    new jobs work identically."""
+    key = job.get("r2_video_key") or ""
+    if key.startswith("users/"):
+        parts = key.split("/")
+        if len(parts) > 1:
+            return parts[1]
+    return job.get("user_id") or ""
+
+
 def get_queue():
     _, data = _req("GET", "/api/processor/queue")
     return data.get("jobs") or []
@@ -211,6 +223,11 @@ def get_optimize_queue():
     return data.get("jobs") or []
 
 
+def get_frameopt_queue():
+    _, data = _req("GET", "/api/processor/queue/frameopts")
+    return data.get("batches") or []
+
+
 def process_job(job_id):
     print(f"[{job_id}] claim", flush=True)
     status, data = _req("POST", f"/api/processor/claim/{job_id}")
@@ -218,7 +235,7 @@ def process_job(job_id):
         print(f"[{job_id}] claim failed {status}: {data}", flush=True)
         return
     job = data.get("job") or {}
-    user_id = job.get("user_id") or ""
+    seg = _user_segment(job)
 
     local = None
     try:
@@ -251,8 +268,8 @@ def process_job(job_id):
         for fr in gen:
             count += 1
             fn = fr["frame_number"]
-            full_key = config.full_frame_key(user_id, job_id, fn)
-            thumb_key = config.thumb_frame_key(user_id, job_id, fn)
+            full_key = config.full_frame_key(seg, job_id, fn)
+            thumb_key = config.thumb_frame_key(seg, job_id, fn)
             _put_r2_retry(full_key, fr["full_bytes"], "image/jpeg", f"full {fn}")
             _put_r2_retry(thumb_key, fr["thumb_bytes"], "image/jpeg", f"thumb {fn}")
             q = f"?src={fr['source_frame_number']}&t={fr['timestamp']:.3f}&w={fr['width']}&h={fr['height']}"
@@ -268,6 +285,24 @@ def process_job(job_id):
         if meta is None:
             raise RuntimeError("no frames extracted")
 
+        # Video poster for the user-gallery card: first try 1s in (fast seek),
+        # fall back to the first frame, then give up silently if ffmpeg can't.
+        poster_key = config.video_thumb_key(seg, job_id)
+        poster_path = os.path.join(tempfile.gettempdir(), f"frameforge_poster_{job_id}.jpg")
+        poster_ok = False
+        try:
+            _run_ffmpeg(["-ss", "1", "-i", local, "-map", "0:v:0", "-frames:v", "1", "-q:v", "2", poster_path])
+        except Exception:
+            try:
+                _run_ffmpeg(["-i", local, "-map", "0:v:0", "-frames:v", "1", "-q:v", "2", poster_path])
+            except Exception:
+                poster_path = None
+        if poster_path and os.path.exists(poster_path) and os.path.getsize(poster_path) > 0:
+            with open(poster_path, "rb") as f:
+                _put_r2_retry(poster_key, f.read(), "image/jpeg", "video poster")
+            os.remove(poster_path)
+            poster_ok = True
+
         complete_body = {
             "srcFps": meta["src_fps"],
             "total": meta["total"],
@@ -276,6 +311,8 @@ def process_job(job_id):
             "duration": (meta["total"] / meta["src_fps"]) if meta["src_fps"] else 0,
             "extracted": count,
         }
+        if poster_ok:
+            complete_body["videoThumbKey"] = poster_key
         s, cdata = _req("POST", f"/api/processor/complete/{job_id}", complete_body)
         print(f"[{job_id}] complete {s}: {cdata}", flush=True)
     except JobAborted as e:
@@ -299,7 +336,7 @@ def process_chunks(job_id):
         print(f"[{job_id}] chunk claim failed {status}: {data}", flush=True)
         return
     job = data.get("job") or {}
-    user_id = job.get("user_id") or ""
+    seg = _user_segment(job)
 
     local = None
     tmpdir = None
@@ -359,7 +396,7 @@ def process_chunks(job_id):
             if size == 0:
                 raise RuntimeError(f"ffmpeg produced empty chunk {i}")
 
-            key = config.chunk_video_key(user_id, job_id, i)
+            key = config.chunk_video_key(seg, job_id, i)
             with open(out_path, "rb") as f:
                 _put_r2_retry(key, f.read(), "video/mp4", f"chunk {i}")
             os.remove(out_path)
@@ -407,13 +444,40 @@ def _smart_resize(img, max_dim):
     return img.resize((max(1, round(w * ratio)), max(1, round(h * ratio))), Image.LANCZOS)
 
 
-def _process_image(job_id, job, optimized_key):
-    """Pillow resize -> WebP/JPEG + JPEG thumb, both written directly to R2.
+def _save_image(img, fmt, quality, out_path):
+    """Encode `img` as `fmt` at `quality` using tikinn-2.py's per-format settings.
+    Returns the MIME content type."""
+    fmt = (fmt or "webp").lower()
+    if fmt == "jpeg":
+        # Flatten RGBA onto white instead of dropping alpha onto black.
+        if img.mode == "RGBA":
+            bg = Image.new("RGB", img.size, (255, 255, 255))
+            bg.paste(img, mask=img.split()[-1])
+            im = bg
+        else:
+            im = img.convert("RGB")
+        im.save(out_path, "JPEG", quality=quality, optimize=True, progressive=True)
+        return "image/jpeg"
+    if fmt == "avif":
+        im = img.convert("RGB") if img.mode == "RGBA" else img
+        im.save(out_path, "AVIF", quality=quality, speed=7)
+        return "image/avif"
+    if fmt == "png":
+        im = img.convert("RGBA") if img.mode not in ("RGB", "RGBA") else img
+        im.save(out_path, "PNG", optimize=True, compress_level=max(1, min(9, int((100 - quality) / 11))))
+        return "image/png"
+    # webp (default)
+    im = img.convert("RGBA") if img.mode not in ("RGB", "RGBA") else img
+    im.save(out_path, "WEBP", quality=quality, method=6, lossless=False)
+    return "image/webp"
 
-    Format follows job.opt_format (default webp). Images need no cv2/ffmpeg.
-    """
-    user_id = job.get("user_id") or ""
+
+def _process_image(job_id, job, optimized_key):
+    """Pillow resize -> any format (webp/jpeg/avif/png) + JPEG thumb, both written
+    directly to R2. Format/quality/maxdim follow the job's opt_* fields.
+    Images need no cv2/ffmpeg."""
     fmt = job.get("opt_format") or "webp"
+    quality = int(job.get("opt_quality") or 85)
     maxdim = job.get("opt_max_dim")
     if maxdim:
         maxdim = int(maxdim)
@@ -446,13 +510,7 @@ def _process_image(job_id, job, optimized_key):
             img = img.convert("RGBA")
 
         out_path = os.path.join(tempfile.gettempdir(), f"frameforge_img_out_{job_id}")
-        if fmt == "jpeg":
-            save = img.convert("RGB") if img.mode == "RGBA" else img
-            save.save(out_path, "JPEG", quality=85, progressive=True)
-            ct = "image/jpeg"
-        else:
-            img.save(out_path, "WEBP", quality=80, method=6)
-            ct = "image/webp"
+        ct = _save_image(img, fmt, quality, out_path)
 
         size = os.path.getsize(out_path)
         if size == 0:
@@ -476,7 +534,7 @@ def _process_image(job_id, job, optimized_key):
 
         _req_ok("POST", f"/api/processor/optimize/complete/{job_id}",
                 {"size": size, "duration": 0, "format": fmt}, what="optimize complete")
-        print(f"[{job_id}] image optimize complete: {size} bytes ({fmt})", flush=True)
+        print(f"[{job_id}] image optimize complete: {size} bytes ({fmt} q{quality})", flush=True)
     finally:
         for p in (local, out_path, thumb_path):
             if p and os.path.exists(p):
@@ -500,6 +558,8 @@ def process_optimize(job_id):
     job = data.get("job") or {}
     optimized_key = job.get("optimized_key")
     crf = int(job.get("opt_crf") or 23)
+    codec = job.get("opt_codec") or "libx264"
+    container = job.get("opt_container") or "mp4"
     maxdim = job.get("opt_max_dim")
     if maxdim:
         maxdim = int(maxdim)
@@ -520,7 +580,8 @@ def process_optimize(job_id):
 
         safe = "".join(c for c in (job.get("original_filename") or "video.mp4") if c.isalnum() or c in "._-") or "video.mp4"
         local = os.path.join(tempfile.gettempdir(), f"frameforge_opt_in_{job_id}_{safe}")
-        out_path = os.path.join(tempfile.gettempdir(), f"frameforge_opt_out_{job_id}.mp4")
+        out_ext = container if container in ("mp4", "mkv", "webm") else "mp4"
+        out_path = os.path.join(tempfile.gettempdir(), f"frameforge_opt_out_{job_id}.{out_ext}")
         print(f"[{job_id}] downloading to {local}", flush=True)
         with requests.get(url, stream=True, timeout=600) as resp:
             resp.raise_for_status()
@@ -529,19 +590,21 @@ def process_optimize(job_id):
                     if chunk:
                         f.write(chunk)
 
-        print(f"[{job_id}] transcoding (crf={crf}, maxdim={maxdim or 'none'})", flush=True)
-        _run_ffmpeg([
-            "-i", local,
-            "-c:v", "libx264",
-            "-crf", str(crf),
-            "-preset", "medium",
-            "-vf", _optimize_filter(maxdim),
-            "-c:a", "aac",
-            "-b:a", "128k",
-            "-pix_fmt", "yuv420p",
-            "-movflags", "+faststart",
-            out_path,
-        ], timeout=1800)
+        # webm cannot carry H.264 — force AV1 (mirrors tikinn-2.py).
+        if container == "webm" and codec != "libsvtav1":
+            codec = "libsvtav1"
+        args = ["-i", local, "-map", "0:v:0", "-c:v", codec, "-crf", str(crf)]
+        if codec == "libsvtav1":
+            args += ["-preset", "6", "-map", "0:a:0?", "-c:a", "libopus", "-b:a", "96k"]
+        else:
+            args += ["-preset", "medium", "-map", "0:a:0?", "-c:a", "aac", "-b:a", "128k"]
+        args += ["-vf", _optimize_filter(maxdim)]
+        if container == "mp4":
+            args += ["-movflags", "+faststart"]
+        args += ["-pix_fmt", "yuv420p", out_path]
+
+        print(f"[{job_id}] transcoding ({container}/{codec}, crf={crf}, maxdim={maxdim or 'none'})", flush=True)
+        _run_ffmpeg(args, timeout=1800)
 
         size = os.path.getsize(out_path)
         if size == 0:
@@ -553,16 +616,18 @@ def process_optimize(job_id):
         cap.release()
         duration = (out_total / out_fps) if out_fps and out_total else 0.0
 
+        ct = {"mp4": "video/mp4", "webm": "video/webm", "mkv": "video/x-matroska"}.get(out_ext, "video/mp4")
+
         # Abort check + metadata heartbeat (409 here -> cancelled, stop cleanly).
         _req_ok("POST", f"/api/processor/optimize/{job_id}/meta",
                 {"size": size, "duration": duration}, what="optimize meta")
 
         with open(out_path, "rb") as f:
-            _put_r2_retry(optimized_key, f.read(), "video/mp4", "optimized video")
+            _put_r2_retry(optimized_key, f.read(), ct, "optimized video")
 
         _req_ok("POST", f"/api/processor/optimize/complete/{job_id}",
                 {"size": size, "duration": duration}, what="optimize complete")
-        print(f"[{job_id}] optimize complete: {size} bytes", flush=True)
+        print(f"[{job_id}] optimize complete: {size} bytes ({out_ext}/{codec})", flush=True)
     except JobAborted as e:
         print(f"[{job_id}] optimize aborted: {e}", flush=True)
     except Exception as e:
@@ -627,6 +692,86 @@ def process_export(export_id):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def process_frame_opt(batch_id):
+    """Re-encode selected frame images (opt_batch) to a chosen format -> direct R2."""
+    print(f"[{batch_id}] frameopt claim", flush=True)
+    status, data = _req("POST", f"/api/processor/frameopt/claim/{batch_id}")
+    if status != 200:
+        print(f"[{batch_id}] frameopt claim failed {status}: {data}", flush=True)
+        return
+    batch = data.get("batch") or {}
+    job = data.get("job") or {}
+    frames = data.get("frames") or []
+    if not batch or not frames:
+        print(f"[{batch_id}] frameopt: no batch/frames in claim", flush=True)
+        return
+
+    job_id = batch.get("job_id") or job.get("id") or ""
+    seg = _user_segment(job)
+    fmt = batch.get("format") or "webp"
+    quality = int(batch.get("quality") or 85)
+    maxdim = batch.get("max_dim")
+    if maxdim:
+        maxdim = int(maxdim)
+
+    tmpdir = tempfile.mkdtemp(prefix=f"frameforge_frameopt_{batch_id}_")
+    processed = 0
+    try:
+        for fr in frames:
+            fn = fr.get("frame_number")
+            if not fn:
+                continue
+            print(f"[{batch_id}] frameopt {processed + 1}/{len(frames)} (frame {fn})", flush=True)
+            s, sdata = _req("GET", f"/api/processor/frameopt/{batch_id}/source/{fn}")
+            if s != 200:
+                raise RuntimeError(f"source frame {fn} failed HTTP {s}: {sdata}")
+            url = sdata.get("url")
+            if not url:
+                raise RuntimeError(f"no source URL for frame {fn}")
+
+            src = os.path.join(tmpdir, f"src_{fn}.jpg")
+            with requests.get(url, stream=True, timeout=300) as resp:
+                resp.raise_for_status()
+                with open(src, "wb") as fh:
+                    for chunk in resp.iter_content(chunk_size=1 << 20):
+                        if chunk:
+                            fh.write(chunk)
+
+            img = Image.open(src)
+            img.load()
+            if maxdim:
+                img = _smart_resize(img, maxdim)
+            if img.mode not in ("RGB", "RGBA"):
+                img = img.convert("RGBA")
+
+            out_path = os.path.join(tmpdir, f"out_{fn}")
+            ct = _save_image(img, fmt, quality, out_path)
+            size = os.path.getsize(out_path)
+            if size == 0:
+                raise RuntimeError(f"frameopt produced empty output for frame {fn}")
+
+            dst = config.optimized_frame_key(seg, job_id, fmt, fn)
+            with open(out_path, "rb") as fh:
+                _put_r2_retry(dst, fh.read(), ct, f"opt frame {fn}")
+            os.remove(src)
+            os.remove(out_path)
+
+            processed += 1
+            # Heartbeat + processed counter. 409 -> batch no longer processing.
+            _req_ok("POST", f"/api/processor/frameopt/{batch_id}/meta",
+                    {"processed": processed}, what="frameopt meta")
+
+        _req_ok("POST", f"/api/processor/frameopt/complete/{batch_id}", {}, what="frameopt complete")
+        print(f"[{batch_id}] frameopt complete: {processed}/{len(frames)}", flush=True)
+    except JobAborted as e:
+        print(f"[{batch_id}] frameopt aborted: {e}", flush=True)
+    except Exception as e:
+        print(f"[{batch_id}] frameopt ERROR: {e}", flush=True)
+        _req("POST", f"/api/processor/frameopt/fail/{batch_id}", {"message": str(e)})
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def main():
     once = "--once" in sys.argv
     print(f"FrameForge local runner — worker={BASE} poll={POLL_INTERVAL}s once={once}", flush=True)
@@ -655,6 +800,12 @@ def main():
                 print(f"optimize queue: {len(optimize_jobs)} job(s) -> {optimize_jobs}", flush=True)
             for jid in optimize_jobs:
                 process_optimize(jid)
+
+            frameopts = get_frameopt_queue()
+            if frameopts:
+                print(f"frameopt queue: {len(frameopts)} batch(es) -> {frameopts}", flush=True)
+            for bid in frameopts:
+                process_frame_opt(bid)
         except Exception as e:
             print(f"poll error: {e}", flush=True)
         if once:

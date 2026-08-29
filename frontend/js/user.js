@@ -5,6 +5,7 @@
 
   const TERMINAL = ["completed", "failed", "cancelled"];
   let polling = false;
+  let lastJobs = [];
 
   const viewAuth = $("view-auth");
   const viewApp = $("view-app");
@@ -57,7 +58,7 @@
     showAuth();
   });
 
-  // Sidebar "My Videos" — refresh the list when clicked.
+  // Sidebar "My Media" — refresh the list when clicked.
   document.querySelectorAll(".nav a").forEach((a) => {
     a.addEventListener("click", (e) => {
       e.preventDefault();
@@ -70,37 +71,93 @@
   // ── Upload ────────────────────────────────────────────────
   const dropzone = $("dropzone");
   const fileInput = $("file-input");
+  const folderInput = $("folder-input");
 
   dropzone.addEventListener("click", () => fileInput.click());
   dropzone.addEventListener("dragover", (e) => { e.preventDefault(); dropzone.classList.add("dragover"); });
   dropzone.addEventListener("dragleave", () => dropzone.classList.remove("dragover"));
-  dropzone.addEventListener("drop", (e) => {
+  dropzone.addEventListener("drop", async (e) => {
     e.preventDefault();
     dropzone.classList.remove("dragover");
-    if (e.dataTransfer.files.length) startUpload([...e.dataTransfer.files]);
+    if (e.dataTransfer.items && e.dataTransfer.items.length) {
+      const files = await getFilesFromDrop(e.dataTransfer.items);
+      if (files.length) startUpload(files, files.some((f) => f._relPath && f._relPath.includes("/")) ? "Folder" : "");
+    } else if (e.dataTransfer.files.length) {
+      startUpload([...e.dataTransfer.files]);
+    }
   });
   fileInput.addEventListener("change", () => {
     if (fileInput.files.length) startUpload([...fileInput.files]);
   });
+  folderInput.addEventListener("change", () => {
+    const files = [...folderInput.files];
+    if (files.length) startUpload(files, "Folder");
+    folderInput.value = "";
+  });
 
   $("btn-upload").addEventListener("click", () => $("upload-panel").classList.toggle("hidden"));
 
+  // Recursively walk dropped entries (webkitdirectory exposes folder trees).
+  function getFilesFromDrop(items) {
+    return new Promise((resolve) => {
+      const out = [];
+      const walk = (entry, path) => {
+        if (entry && entry.isFile) {
+          return new Promise((res) => {
+            entry.file((file) => {
+              file._relPath = path ? `${path}/${file.name}` : file.name;
+              out.push(file);
+              res();
+            }, () => res());
+          });
+        }
+        if (entry && entry.isDirectory) {
+          const reader = entry.createReader();
+          return new Promise((res) => {
+            const readBatch = () => reader.readEntries((entries) => {
+              if (!entries.length) return res();
+              Promise.all(entries.map((e2) => walk(e2, path ? `${path}/${entry.name}` : entry.name))).then(readBatch);
+            }, () => res());
+            readBatch();
+          });
+        }
+        return Promise.resolve();
+      };
+      const prom = [];
+      for (const it of items) {
+        if (it.kind === "file") {
+          const e = it.webkitGetAsEntry && it.webkitGetAsEntry();
+          if (e) prom.push(walk(e, ""));
+        }
+      }
+      Promise.all(prom).then(() => resolve(out));
+    });
+  }
+
   // Each file gets its own row (name + progress bar + status). One bad file
-  // fails on its own row without aborting the rest of the batch.
-  async function startUpload(files) {
+  // fails on its own row without aborting the rest of the batch. Folder mode
+  // prefixes each row with the relative path so the user can tell them apart.
+  async function startUpload(files, label) {
     $("upload-panel").classList.remove("hidden");
     const wrap = $("upload-batch");
     wrap.classList.remove("hidden");
     wrap.innerHTML = "";
     $("upload-err").textContent = "";
+    if (label) {
+      const head = document.createElement("div");
+      head.className = "upload-batch-head";
+      head.textContent = `Uploading ${label} — ${files.length} file${files.length === 1 ? "" : "s"}`;
+      wrap.appendChild(head);
+    }
     let ok = 0;
 
     await Promise.all(files.map(async (file) => {
+      const display = file._relPath || file.name;
       const row = document.createElement("div");
       row.className = "upload-row";
       row.innerHTML = `
         <div class="upload-row-head">
-          <span class="upload-row-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</span>
+          <span class="upload-row-name" title="${escapeHtml(display)}">${escapeHtml(display)}</span>
           <span class="upload-row-status">0%</span>
         </div>
         <div class="progress"><span></span></div>`;
@@ -126,7 +183,7 @@
 
     fileInput.value = "";
     if (ok) {
-      toast(ok === files.length ? `Uploaded ${ok} video${ok === 1 ? "" : "s"} — queued for processing.` : `${ok}/${files.length} uploaded, rest failed.`, ok === files.length ? "ok" : "err");
+      toast(ok === files.length ? `Uploaded ${ok} file${ok === 1 ? "" : "s"} — queued.` : `${ok}/${files.length} uploaded, rest failed.`, ok === files.length ? "ok" : "err");
     } else {
       toast("Upload failed.", "err");
     }
@@ -149,58 +206,86 @@
 
   $("empty-upload").addEventListener("click", () => $("upload-panel").classList.remove("hidden"));
 
-  // ── Videos list ───────────────────────────────────────────
+  // ── Media gallery ─────────────────────────────────────────
+  $("gallery-search").addEventListener("input", () => renderGallery());
+
   async function loadVideos() {
     try {
       const data = await API.request("/api/videos");
-      renderVideos(data.jobs || []);
-      const hasLive = (data.jobs || []).some((j) => !TERMINAL.includes(j.status));
+      lastJobs = data.jobs || [];
+      renderGallery();
+      const hasLive = lastJobs.some((j) => !TERMINAL.includes(j.status));
       if (hasLive) startPolling(); else stopPolling();
     } catch (err) {
       if (err.status === 401) { API.logout(); showAuth(); }
     }
   }
 
-  function renderVideos(jobs) {
-    $("videos-empty").classList.toggle("hidden", jobs.length > 0);
-    $("videos-table").classList.toggle("hidden", jobs.length === 0);
-    const framesTotal = jobs.reduce((a, j) => a + (j.extracted_frames || 0), 0);
-    const chunksTotal = jobs.reduce((a, j) => a + (j.chunk_count || 0), 0);
+  function renderGallery() {
+    const jobs = lastJobs;
+    const query = ($("gallery-search").value || "").trim().toLowerCase();
+    const filtered = query ? jobs.filter((j) => (j.original_filename || "").toLowerCase().includes(query)) : jobs;
+    $("videos-empty").classList.toggle("hidden", filtered.length > 0);
+    $("gallery").classList.toggle("hidden", filtered.length === 0);
+    const imgCount = jobs.filter((j) => j.media_type === "image").length;
+    const vidCount = jobs.length - imgCount;
     $("library-note").textContent = jobs.length
-      ? `${jobs.length} video${jobs.length === 1 ? "" : "s"} · ${framesTotal} frame${framesTotal === 1 ? "" : "s"} · ${chunksTotal} chunk${chunksTotal === 1 ? "" : "s"}`
+      ? `${imgCount} image${imgCount === 1 ? "" : "s"} · ${vidCount} video${vidCount === 1 ? "" : "s"}`
       : "—";
-    const body = $("videos-body");
-    body.innerHTML = "";
-    for (const j of jobs) {
+    const gallery = $("gallery");
+    gallery.innerHTML = "";
+    if (!filtered.length) {
+      gallery.classList.remove("hidden");
+      gallery.innerHTML = `<div class="empty-state"><div class="empty-icon">🔍</div><div>No media${query ? ` match “${escapeHtml(query)}”` : " yet"}. Upload files or a folder and they'll appear here.</div></div>`;
+      return;
+    }
+    for (const j of filtered) {
       const isImage = j.media_type === "image";
-      const dl = j.optimize_status === "completed" && j.optimizedUrl
-        ? `<a class="btn small" href="${j.optimizedUrl}" target="_blank" rel="noopener">Download</a>`
-        : "";
-      const nameCell = isImage && j.thumbUrl
-        ? `<td class="mono"><img class="gallery-thumb" src="${j.thumbUrl}" alt="" loading="lazy" />${escapeHtml(j.original_filename)}</td>`
-        : `<td class="mono">${escapeHtml(j.original_filename)}</td>`;
-      const tr = document.createElement("tr");
-      tr.innerHTML = `
-        ${nameCell}
-        <td>${API.fmtBytes(j.file_size)}</td>
-        <td class="mono">${isImage ? (j.width && j.height ? `${j.width}×${j.height}` : "—") : API.fmtDuration(j.duration)}</td>
-        <td class="mono small muted">${new Date(j.created_at).toLocaleString()}</td>
-        <td class="mono">${isImage ? "—" : (j.extracted_frames || 0)}</td>
-        <td>${isImage ? '<span class="muted small">—</span>' : renderChunkCell(j)}</td>
-        <td><span class="badge ${j.status}">${API.statusLabel(j.status)}</span></td>
-        <td>${dl}</td>`;
-      body.appendChild(tr);
+      const thumb = isImage ? (j.thumbUrl || "") : (j.videoThumbUrl || "");
+      const hasDl = j.optimize_status === "completed" && j.optimizedUrl;
+      const badge = isImage
+        ? { cls: j.optimize_status || "uploaded", label: API.statusLabel(j.optimize_status || "uploaded") }
+        : { cls: j.status, label: API.statusLabel(j.status) };
+      const card = document.createElement("div");
+      card.className = "media-card";
+      card.innerHTML = `
+        <div class="media-thumb">
+          ${thumb
+            ? `<img src="${thumb}" alt="" loading="lazy" />`
+            : `<div class="media-thumb-fallback">${isImage ? "🖼️" : "🎬"}</div>`}
+          ${isImage ? "" : '<span class="media-type-badge">video</span>'}
+        </div>
+        <div class="media-info">
+          <div class="media-name" title="${escapeHtml(j.original_filename)}">${escapeHtml(j.original_filename)}</div>
+          <div class="media-meta">${API.fmtBytes(j.file_size)} · ${new Date(j.created_at).toLocaleDateString()}</div>
+          <div class="media-status">
+            <span class="badge ${badge.cls}">${badge.label}</span>
+            ${isImage ? "" : `<span class="badge ${j.chunk_status && j.chunk_status !== "none" && j.chunk_status !== "completed" ? "queued" : "completed"}">${j.chunk_status && j.chunk_status !== "none" ? (j.chunk_status === "completed" ? "chunks" : API.statusLabel(j.chunk_status)) : "no chunks"}</span>`}
+          </div>
+        </div>
+        <div class="media-actions">
+          ${hasDl ? `<a class="btn small" href="${j.optimizedUrl}" target="_blank" rel="noopener" download>Download</a>` : ""}
+          <button class="btn small ghost danger" data-del="${j.id}" title="Delete">Delete</button>
+        </div>`;
+      gallery.appendChild(card);
     }
   }
 
-  function renderChunkCell(j) {
-    if (!j.chunk_status || j.chunk_status === "none") return '<span class="muted small">—</span>';
-    const cls = j.chunk_status === "completed" ? "completed" : j.chunk_status === "failed" ? "failed" : "queued";
-    const label = j.chunk_status === "completed"
-      ? (j.chunk_count ? `${j.chunk_count} chunks` : "done")
-      : API.statusLabel(j.chunk_status);
-    return `<span class="badge ${cls}">${label}</span>`;
-  }
+  $("gallery").addEventListener("click", async (e) => {
+    const btn = e.target.closest("[data-del]");
+    if (!btn) return;
+    const id = btn.dataset.del;
+    if (!confirm("Delete this media permanently? This also removes its frames, chunks and optimized files.")) return;
+    btn.disabled = true;
+    try {
+      await API.request(`/api/jobs/${id}`, { method: "DELETE" });
+      toast("Deleted.", "ok");
+      loadVideos();
+    } catch (err) {
+      toast("Delete failed: " + err.message, "err");
+      btn.disabled = false;
+    }
+  });
 
   function startPolling() {
     if (polling) return;

@@ -82,6 +82,12 @@
           </div>
         </div>
 
+        <div id="bulk-bar" class="bulk-bar hidden">
+          <span class="pager-info" id="bulk-count">0 selected</span>
+          <button class="btn small" id="bulk-optimize" type="button">Optimize Selected</button>
+          <button class="btn ghost small" id="bulk-clear" type="button">Clear</button>
+        </div>
+
         <div id="jobs-empty" class="empty-state hidden">
           <div class="empty-icon">🎬</div>
           <div>No jobs in this view.</div>
@@ -91,6 +97,7 @@
           <table>
             <thead>
               <tr>
+                <th style="width:30px;"><input type="checkbox" id="jobs-select-all" title="Select all on this page" /></th>
                 <th>User</th><th>Filename</th><th>Size</th><th>Duration</th>
                 <th>Resolution</th><th>Uploaded</th><th>Status</th><th>Frames</th><th>Chunks</th><th>Actions</th>
               </tr>
@@ -176,6 +183,10 @@
             <span class="pager-info" id="sel-count">0 selected</span>
             <button class="btn ghost small" id="select-all" type="button">Select all</button>
             <button class="btn ghost small" id="deselect-all" type="button">Deselect</button>
+            <button class="btn small hidden" id="optimize-selected-frames" type="button">Optimize Selected Frames</button>
+            <span class="pager-info hidden" id="opt-batch-info"></span>
+            <button class="btn ghost small hidden" id="opt-toggle" type="button">Original / Optimized</button>
+            <button class="btn small hidden" id="opt-export-zip" type="button">Export Optimized ZIP</button>
             <button class="btn danger small" id="delete-selected" type="button">Delete selected</button>
             <button class="btn small" id="export-all" type="button">ZIP all</button>
             <button class="btn small" id="export-selected" type="button">ZIP selected</button>
@@ -220,6 +231,84 @@
         </div>
       </div>
     </main>
+  </div>
+
+  <!-- Optimize options modal (job / bulk / frames) -->
+  <div class="modal-backdrop hidden" id="optimize-modal">
+    <div class="modal" style="max-width:540px;">
+      <div class="modal-header">
+        <h3 id="optimize-title">Optimize</h3>
+        <button class="btn ghost small" id="optimize-close" type="button">Close</button>
+      </div>
+      <div class="modal-body">
+        <div id="opt-fields-video">
+          <div class="row gap-8">
+            <div class="field grow">
+              <label>Container</label>
+              <select id="opt-container" class="input">
+                <option value="mp4">MP4</option>
+                <option value="mkv">MKV</option>
+                <option value="webm">WebM</option>
+              </select>
+            </div>
+            <div class="field grow">
+              <label>Codec</label>
+              <select id="opt-codec" class="input">
+                <option value="libx264">H.264 (x264)</option>
+                <option value="libsvtav1">AV1 (SVT-AV1)</option>
+              </select>
+            </div>
+          </div>
+          <div class="field">
+            <label>CRF (lower = better quality / larger file)</label>
+            <select id="opt-crf" class="input">
+              <option value="18">18 — high quality</option>
+              <option value="23" selected>23 — default</option>
+              <option value="28">28 — smaller</option>
+              <option value="32">32 — small</option>
+              <option value="38">38 — smallest</option>
+            </select>
+          </div>
+        </div>
+        <div id="opt-fields-image">
+          <div class="row gap-8">
+            <div class="field grow">
+              <label>Format</label>
+              <select id="opt-format" class="input">
+                <option value="webp" selected>WebP</option>
+                <option value="jpeg">JPEG</option>
+                <option value="avif">AVIF</option>
+                <option value="png">PNG</option>
+              </select>
+            </div>
+            <div class="field grow">
+              <label>Quality</label>
+              <select id="opt-quality" class="input">
+                <option value="95">95 — best</option>
+                <option value="85" selected>85 — default</option>
+                <option value="75">75</option>
+                <option value="65">65</option>
+                <option value="50">50 — small</option>
+              </select>
+            </div>
+          </div>
+        </div>
+        <div class="field" id="opt-field-maxdim">
+          <label>Max dimension</label>
+          <select id="opt-maxdim" class="input">
+            <option value="">Keep original</option>
+            <option value="854">854px</option>
+            <option value="1280">1280px</option>
+            <option value="1920">1920px</option>
+            <option value="2560">2560px</option>
+          </select>
+        </div>
+        <div class="auth-err" id="optimize-err"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" id="optimize-submit" type="button">Start Optimization</button>
+      </div>
+    </div>
   </div>
 
   <!-- Export status modal -->

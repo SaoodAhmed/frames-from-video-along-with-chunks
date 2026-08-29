@@ -38,22 +38,38 @@ CANCEL_CHECK_INTERVAL = 20  # frames between cancellation checks
 
 SCENE_THRESHOLD_DEFAULT = 30.0
 
-# R2 object key layout (must match the Worker)
-def full_frame_key(user_id: str, job_id: str, n: int) -> str:
-    return f"users/{user_id}/jobs/{job_id}/frames/full/frame_{n:04d}.jpg"
+# R2 object key layout (must match the Worker).
+# `user_segment` is the email for new uploads, the legacy uid for old ones; it is
+# always derived from the job's r2_video_key (`users/{segment}/jobs/...`).
+def full_frame_key(user_segment: str, job_id: str, n: int) -> str:
+    return f"users/{user_segment}/jobs/{job_id}/frames/full/frame_{n:04d}.jpg"
 
 
-def thumb_frame_key(user_id: str, job_id: str, n: int) -> str:
-    return f"users/{user_id}/jobs/{job_id}/frames/thumbs/frame_{n:04d}.jpg"
+def thumb_frame_key(user_segment: str, job_id: str, n: int) -> str:
+    return f"users/{user_segment}/jobs/{job_id}/frames/thumbs/frame_{n:04d}.jpg"
 
 
-def chunk_video_key(user_id: str, job_id: str, n: int) -> str:
-    return f"users/{user_id}/jobs/{job_id}/chunks/chunk_{n:04d}.mp4"
+def chunk_video_key(user_segment: str, job_id: str, n: int) -> str:
+    return f"users/{user_segment}/jobs/{job_id}/chunks/chunk_{n:04d}.mp4"
 
 
-def export_key(user_id: str, job_id: str, export_type: str, kind: str = "frames") -> str:
+def export_key(user_segment: str, job_id: str, export_type: str, kind: str = "frames") -> str:
     name = f"{kind}_selected.zip" if export_type == "selected" else f"{kind}_all.zip"
-    return f"users/{user_id}/jobs/{job_id}/exports/{name}"
+    return f"users/{user_segment}/jobs/{job_id}/exports/{name}"
+
+
+def video_thumb_key(user_segment: str, job_id: str) -> str:
+    return f"users/{user_segment}/jobs/{job_id}/thumbnail.jpg"
+
+
+# Image formats the frame-optimizer supports (Pillow save args) — mirrors the Worker.
+IMAGE_EXT = {"webp": "webp", "jpeg": "jpg", "avif": "avif", "png": "png"}
+IMAGE_FORMATS = ("webp", "jpeg", "avif", "png")
+
+
+def optimized_frame_key(user_segment: str, job_id: str, fmt: str, n: int) -> str:
+    ext = IMAGE_EXT.get(fmt, "webp")
+    return f"users/{user_segment}/jobs/{job_id}/frames/optimized/{fmt}/frame_{n:04d}.{ext}"
 
 
 # ffmpeg for stream-copy chunk export (found on PATH; matches local_trimer-5.py)

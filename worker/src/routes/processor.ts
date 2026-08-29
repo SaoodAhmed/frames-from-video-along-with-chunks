@@ -10,8 +10,10 @@ import {
   insertChunk,
   listChunkKeys,
 } from "../db/jobs";
-import { r2Keys } from "../types";
-import type { Job, ExportKind, Frame } from "../types";
+import { getOptBatch, listFramesByIds, transitionOptBatch, updateOptBatchProgress } from "../db/opt";
+import { r2Keys, userSegmentFromKey, IMAGE_EXT } from "../lib/r2";
+import type { ImageFormat } from "../lib/r2";
+import type { Job, ExportKind, Frame, OptBatch } from "../types";
 
 /**
  * Processor API — consumed by the frame-extraction runner (currently a local
@@ -79,7 +81,7 @@ processor.put("/frame/:jobId/:frameNumber", async (c) => {
   const body = c.req.raw.body;
   if (!body) return c.json({ error: "Empty body" }, 400);
 
-  const fullKey = `users/${job.user_id}/jobs/${jobId}/frames/full/frame_${String(frameNumber).padStart(4, "0")}.jpg`;
+  const fullKey = `users/${userSegmentFromKey(job.r2_video_key)}/jobs/${jobId}/frames/full/frame_${String(frameNumber).padStart(4, "0")}.jpg`;
   try {
     await c.env.R2.put(fullKey, body, { httpMetadata: { contentType: "image/jpeg" } });
   } catch (err) {
@@ -111,7 +113,7 @@ processor.put("/frame/:jobId/:frameNumber/thumb", async (c) => {
   const body = c.req.raw.body;
   if (!body) return c.json({ error: "Empty body" }, 400);
 
-  const fullKey = `users/${job.user_id}/jobs/${jobId}/frames/full/frame_${String(frameNumber).padStart(4, "0")}.jpg`;
+  const fullKey = `users/${userSegmentFromKey(job.r2_video_key)}/jobs/${jobId}/frames/full/frame_${String(frameNumber).padStart(4, "0")}.jpg`;
   const thumbKey = fullKey.replace("/frames/full/", "/frames/thumbs/");
   try {
     await c.env.R2.put(thumbKey, body, { httpMetadata: { contentType: "image/jpeg" } });
@@ -141,7 +143,7 @@ processor.post("/frame/:jobId/:frameNumber/meta", async (c) => {
   if (!job) return c.json({ error: "Not found" }, 404);
   if (job.status !== "processing") return c.json({ error: "Job is not processing" }, 409);
 
-  const fullKey = `users/${job.user_id}/jobs/${jobId}/frames/full/frame_${String(frameNumber).padStart(4, "0")}.jpg`;
+  const fullKey = `users/${userSegmentFromKey(job.r2_video_key)}/jobs/${jobId}/frames/full/frame_${String(frameNumber).padStart(4, "0")}.jpg`;
   const id = crypto.randomUUID();
   await c.env.DB.prepare(
     `INSERT INTO frames (id, job_id, frame_number, source_frame_number, timestamp, r2_key, width, height, deleted, created_at)
@@ -177,7 +179,15 @@ processor.post("/progress/:jobId", async (c) => {
 processor.post("/complete/:jobId", async (c) => {
   if (!authorize(c)) return c.json({ error: "Unauthorized" }, 401);
   const jobId = c.req.param("jobId");
-  let body: { srcFps?: number; total?: number; width?: number; height?: number; duration?: number; extracted?: number };
+  let body: {
+    srcFps?: number;
+    total?: number;
+    width?: number;
+    height?: number;
+    duration?: number;
+    extracted?: number;
+    videoThumbKey?: string;
+  };
   try {
     body = await c.req.json();
   } catch {
@@ -190,6 +200,7 @@ processor.post("/complete/:jobId", async (c) => {
     width: Number(body.width) || null,
     height: Number(body.height) || null,
     duration: Number(body.duration) || null,
+    video_thumb_key: typeof body.videoThumbKey === "string" ? body.videoThumbKey : null,
     error_message: null,
   });
   if (!ok) return c.json({ error: "Job not completable" }, 409);
@@ -257,7 +268,7 @@ processor.post("/chunk/:jobId/:chunkNumber/meta", async (c) => {
   if (!job) return c.json({ error: "Not found" }, 404);
   if (job.chunk_status !== "processing") return c.json({ error: "Chunks are not processing" }, 409);
 
-  const r2Key = r2Keys.chunkVideo(job.user_id, jobId, chunkNumber);
+  const r2Key = r2Keys.chunkVideo(userSegmentFromKey(job.r2_video_key), jobId, chunkNumber);
   await insertChunk(c.env.DB, {
     id: crypto.randomUUID(),
     job_id: jobId,
@@ -430,6 +441,97 @@ processor.post("/optimize/fail/:jobId", async (c) => {
   return c.json({ ok: true });
 });
 
+// ── Frame-image optimization (opt_batches) ──────────────────────────────────
+
+// GET /queue/frameopts — ids of opt_batches waiting to be optimized
+processor.get("/queue/frameopts", async (c) => {
+  if (!authorize(c)) return c.json({ error: "Unauthorized" }, 401);
+  const rows = await c.env.DB.prepare("SELECT id FROM opt_batches WHERE status = 'queued'").all<{ id: string }>();
+  return c.json({ batches: (rows.results ?? []).map((r) => r.id) });
+});
+
+// POST /frameopt/claim/:batchId — opt_batches queued -> processing (guarded).
+// Returns the batch, its job (runner derives the user segment from r2_video_key),
+// and the ordered frames the runner must re-encode.
+processor.post("/frameopt/claim/:batchId", async (c) => {
+  if (!authorize(c)) return c.json({ error: "Unauthorized" }, 401);
+  const batchId = c.req.param("batchId");
+  const ok = await transitionOptBatch(c.env.DB, batchId, "queued", "processing");
+  if (!ok) return c.json({ error: "Batch not claimable" }, 409);
+  const batch = await getOptBatch(c.env.DB, batchId);
+  if (!batch) return c.json({ error: "Batch not found" }, 404);
+  const job = await getJob(c.env.DB, batch.job_id);
+  if (!job) return c.json({ error: "Job not found" }, 404);
+  const frameIds = JSON.parse(batch.frame_ids) as string[];
+  const frames = await listFramesByIds(c.env.DB, job.id, frameIds);
+  return c.json({ batch, job, frames });
+});
+
+// GET /frameopt/:batchId/source/:frameNumber — presigned GET (900s) of the
+// source frame's R2 object, streamed one-at-a-time so arbitrarily large batches
+// never exhaust memory.
+processor.get("/frameopt/:batchId/source/:frameNumber", async (c) => {
+  if (!authorize(c)) return c.json({ error: "Unauthorized" }, 401);
+  const batchId = c.req.param("batchId");
+  const frameNumber = parseInt(c.req.param("frameNumber"), 10);
+  if (!Number.isInteger(frameNumber) || frameNumber < 1) return c.json({ error: "Invalid frame number" }, 400);
+  const batch = await getOptBatch(c.env.DB, batchId);
+  if (!batch) return c.json({ error: "Batch not found" }, 404);
+  const row = await c.env.DB.prepare(
+    "SELECT r2_key, width, height FROM frames WHERE job_id = ? AND frame_number = ? AND deleted = 0"
+  )
+    .bind(batch.job_id, frameNumber)
+    .first<{ r2_key: string; width: number; height: number }>();
+  if (!row) return c.json({ error: "Frame not found" }, 404);
+  const host = getR2Host(c.env.R2_ENDPOINT, c.env.R2_BUCKET_NAME);
+  const url = await presignGet(c.env.R2_ACCESS_KEY_ID, c.env.R2_SECRET_ACCESS_KEY, S3_REGION, host, row.r2_key, 900);
+  return c.json({ url, frameNumber, width: row.width, height: row.height });
+});
+
+// POST /frameopt/:batchId/meta — heartbeat + processed counter. Returns 409 when
+// the batch is no longer 'processing' (cancelled) — the abort mechanism.
+processor.post("/frameopt/:batchId/meta", async (c) => {
+  if (!authorize(c)) return c.json({ error: "Unauthorized" }, 401);
+  const batchId = c.req.param("batchId");
+  let body: { processed?: number };
+  try {
+    body = await c.req.json();
+  } catch {
+    body = {};
+  }
+  const ok = await updateOptBatchProgress(c.env.DB, batchId, Number(body.processed) || 0);
+  if (!ok) return c.json({ error: "Batch was cancelled" }, 409);
+  return c.json({ ok: true });
+});
+
+// POST /frameopt/complete/:batchId — opt_batches processing -> completed
+processor.post("/frameopt/complete/:batchId", async (c) => {
+  if (!authorize(c)) return c.json({ error: "Unauthorized" }, 401);
+  const batchId = c.req.param("batchId");
+  const ok = await transitionOptBatch(c.env.DB, batchId, "processing", "completed");
+  if (!ok) return c.json({ error: "Batch not completable" }, 409);
+  return c.json({ ok: true });
+});
+
+// POST /frameopt/fail/:batchId — mark an opt_batch as failed with a message
+processor.post("/frameopt/fail/:batchId", async (c) => {
+  if (!authorize(c)) return c.json({ error: "Unauthorized" }, 401);
+  const batchId = c.req.param("batchId");
+  let body: { message?: string };
+  try {
+    body = await c.req.json();
+  } catch {
+    body = {};
+  }
+  const message = typeof body.message === "string" ? body.message.slice(0, 2000) : "frame optimization failed";
+  await c.env.DB.prepare(
+    "UPDATE opt_batches SET status = 'failed', error_message = ?, updated_at = ? WHERE id = ? AND status IN ('processing','queued')"
+  )
+    .bind(message, new Date().toISOString(), batchId)
+    .run();
+  return c.json({ ok: true });
+});
+
 // ── Exports (ZIP built by the runner) ───────────────────────────────────────
 
 // GET /exports/queue — ids of export rows waiting to be zipped
@@ -465,13 +567,15 @@ processor.get("/exports/:exportId", async (c) => {
     status: string;
     frame_ids: string | null;
     chunk_ids: string | null;
+    batch_id: string | null;
   }>();
   if (!exp) return c.json({ error: "Not found" }, 404);
 
   const job = await getJob(c.env.DB, exp.job_id);
   if (!job) return c.json({ error: "Job not found" }, 404);
 
-  const kind = exp.kind === "chunks" ? "chunks" : "frames";
+  const kind = exp.kind === "chunks" ? "chunks" : exp.kind === "frames_opt" ? "frames_opt" : "frames";
+  const seg = userSegmentFromKey(job.r2_video_key);
   let items: { key: string; name: string }[] = [];
 
   if (kind === "chunks") {
@@ -489,6 +593,18 @@ processor.get("/exports/:exportId", async (c) => {
       keys = await listChunkKeys(c.env.DB, job.id);
     }
     items = keys.map((k) => ({ key: k.r2_key, name: `chunk_${String(k.chunk_number).padStart(4, "0")}.mp4` }));
+  } else if (kind === "frames_opt") {
+    // Optimized-frame export: bundle the re-encoded keys of the referenced opt_batch.
+    const batch = exp.batch_id ? await getOptBatch(c.env.DB, exp.batch_id) : null;
+    if (!batch) return c.json({ error: "opt_batch not found" }, 404);
+    const frameIds = JSON.parse(batch.frame_ids) as string[];
+    const frames = await listFramesByIds(c.env.DB, job.id, frameIds);
+    const fmt = batch.format as ImageFormat;
+    const ext = IMAGE_EXT[fmt];
+    items = frames.map((f) => ({
+      key: r2Keys.optimizedFrame(seg, job.id, fmt, f.frame_number),
+      name: `frame_${String(f.frame_number).padStart(4, "0")}.${ext}`,
+    }));
   } else {
     const includeDeleted = "";
     const whereDeleted = "deleted = 0";
@@ -516,8 +632,8 @@ processor.get("/exports/:exportId", async (c) => {
 
   const exportKey =
     exp.export_type === "selected"
-      ? r2Keys.exportSelected(job.user_id, job.id, kind)
-      : r2Keys.exportAll(job.user_id, job.id, kind);
+      ? r2Keys.exportSelected(seg, job.id, kind)
+      : r2Keys.exportAll(seg, job.id, kind);
 
   return c.json({ exportId: exp.id, job_id: exp.job_id, export_type: exp.export_type, kind, status: exp.status, exportKey, items });
 });
