@@ -162,10 +162,17 @@ def _r2_get_bytes(key):
 
 
 def _download_r2(key, dest):
-    """Stream an R2 object to a local file (used for chunk videos)."""
-    obj = R2.get_object(Bucket=R2_BUCKET, Key=key)
+    """Stream an R2 object to a local file. Returns False if the key does not
+    exist (stale optimized/frame keys race the export), so callers can skip."""
+    try:
+        obj = R2.get_object(Bucket=R2_BUCKET, Key=key)
+    except R2.exceptions.ClientError as e:
+        if e.response.get("Error", {}).get("Code") == "NoSuchKey":
+            return False
+        raise
     with open(dest, "wb") as f:
         shutil.copyfileobj(obj["Body"], f)
+    return True
 
 
 def _run_ffmpeg(args, timeout=600):
@@ -675,14 +682,20 @@ def process_export(export_id):
 
         tmpdir = tempfile.mkdtemp(prefix=f"frameforge_export_{export_id}_")
         zip_path = os.path.join(tmpdir, "export.zip")
+        added = 0
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             for it in items:
                 key = it.get("key")
                 name = it.get("name") or os.path.basename(key or "item")
                 item_path = os.path.join(tmpdir, name)
-                _download_r2(key, item_path)
+                if not _download_r2(key, item_path):
+                    print(f"[{export_id}] skipping missing {key}", flush=True)
+                    continue
                 zf.write(item_path, name)
                 os.remove(item_path)
+                added += 1
+        if not added:
+            raise RuntimeError("no downloadable items in export")
 
         size = os.path.getsize(zip_path)
         with open(zip_path, "rb") as f:
@@ -691,9 +704,9 @@ def process_export(export_id):
         _req_ok("POST", f"/api/processor/exports/{export_id}/complete", {
             "r2Key": export_key,
             "fileSize": size,
-            "count": len(items),
+            "count": added,
         }, what="export complete")
-        print(f"[{export_id}] export complete: {len(items)} item(s), {size} bytes", flush=True)
+        print(f"[{export_id}] export complete: {added} item(s), {size} bytes", flush=True)
     except JobAborted as e:
         print(f"[{export_id}] export aborted: {e}", flush=True)
         _req("POST", f"/api/processor/exports/{export_id}/fail", {"message": str(e)})

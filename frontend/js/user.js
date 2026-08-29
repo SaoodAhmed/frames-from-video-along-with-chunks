@@ -152,7 +152,7 @@
     renderFolderTree();
     loadVideos(true);
   }
-  $('.nav-item[data-folder-id=""]').addEventListener("click", () => selectFolder(null));
+  document.querySelector('.nav-item[data-folder-id=""]').addEventListener("click", () => selectFolder(null));
 
   function promptNewFolder(parentId) {
     const name = prompt("New folder name:");
@@ -194,7 +194,7 @@
   }
 
   // ── Gallery ─────────────────────────────────────────────────────────────
-  $("#media-tabs").addEventListener("click", (e) => {
+  $("media-tabs").addEventListener("click", (e) => {
     const btn = e.target.closest("button[data-type]");
     if (!btn) return;
     currentType = btn.dataset.type;
@@ -558,6 +558,10 @@
     if (!ok && !dup) parts.push("nothing uploaded");
     toast(parts.join(" · "), ok ? "ok" : dup ? "ok" : "err");
     await loadVideos();
+    // Auto-close the upload panel so the fresh gallery is front and center.
+    $("upload-panel").classList.add("hidden");
+    wrap.classList.add("hidden");
+    wrap.innerHTML = "";
   }
 
   function makeUploadRow(wrap, display) {

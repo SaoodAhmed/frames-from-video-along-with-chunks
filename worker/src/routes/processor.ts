@@ -584,15 +584,19 @@ processor.get("/exports/:exportId", async (c) => {
     // at the folder's first job (FK NOT NULL); seg/folder come from its key.
     const folderJobs = await c.env.DB
       .prepare(
-        `SELECT original_filename, r2_video_key, optimized_key FROM jobs
+        `SELECT original_filename, r2_video_key, optimized_key, optimize_status FROM jobs
          WHERE user_id = ? AND COALESCE(folder_id, '') = ? ORDER BY original_filename`
       )
       .bind(job.user_id, folder)
-      .all<{ original_filename: string; r2_video_key: string; optimized_key: string | null }>();
+      .all<{ original_filename: string; r2_video_key: string; optimized_key: string | null; optimize_status: string }>();
     items = [];
     for (const fj of folderJobs.results ?? []) {
       items.push({ key: fj.r2_video_key, name: fj.original_filename });
-      if (fj.optimized_key) items.push({ key: fj.optimized_key, name: `optimized_${fj.original_filename}` });
+      // Only bundle the optimized output once the runner has actually produced
+      // it — queued/processing optimizations have no object in R2 yet.
+      if (fj.optimize_status === "completed" && fj.optimized_key) {
+        items.push({ key: fj.optimized_key, name: `optimized_${fj.original_filename}` });
+      }
     }
   } else if (kind === "chunks") {
     let keys: { id: string; r2_key: string; chunk_number: number }[];

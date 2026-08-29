@@ -75,6 +75,8 @@
   document.querySelectorAll(".nav a").forEach((a) => {
     a.addEventListener("click", (e) => {
       e.preventDefault();
+      // Users / Optimization Gallery links are handled by their own listener.
+      if (a.dataset.view) return;
       // Navigating from a job detail back to the list: stop timers, clear the
       // job, and swap back to the videos view so the click is always visible.
       stopAllTimers();
@@ -1009,7 +1011,9 @@
     const body = $("users-body");
     body.innerHTML = `<div class="empty-state"><div class="empty-icon">🖼️</div><div>Loading files…</div></div>`;
     try {
-      const data = await API.listVideos({ folderId, page: 1, perPage: 200 });
+      const q = new URLSearchParams({ userId, page: "1", perPage: "200" });
+      if (folderId) q.set("folderId", folderId);
+      const data = await API.request(`/api/admin/jobs?${q.toString()}`);
       const files = data.jobs || [];
       $("users-title").textContent = folderId ? "Folder files" : "Root files";
       if (!files.length) {
