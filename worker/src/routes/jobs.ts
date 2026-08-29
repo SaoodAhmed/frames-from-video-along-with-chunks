@@ -16,7 +16,7 @@ import {
   deleteChunkRows,
   deleteChunkExports,
 } from "../db/jobs";
-import { insertOptBatch, latestCompletedBatch, listFramesByIds } from "../db/opt";
+import { insertOptBatch, latestCompletedBatch, listFramesByIds, getOptBatch } from "../db/opt";
 import { PRESETS } from "../types";
 import type { Frame, JwtUser, Chunk, ExportKind } from "../types";
 import { r2Keys, userSegmentFromKey } from "../lib/r2";
@@ -415,8 +415,15 @@ jobs.post("/:id/exports", requireAdmin, async (c) => {
     body = {};
   }
   const kind = body.kind === "frames_opt" ? "frames_opt" : "frames";
-  if (kind === "frames_opt" && typeof body.batchId !== "string") {
-    return c.json({ error: "batchId required for frames_opt export" }, 400);
+  if (kind === "frames_opt") {
+    if (typeof body.batchId !== "string") {
+      return c.json({ error: "batchId required for frames_opt export" }, 400);
+    }
+    const batch = await getOptBatch(c.env.DB, body.batchId);
+    if (!batch) return c.json({ error: "opt_batch not found" }, 404);
+    if (batch.status !== "completed") {
+      return c.json({ error: `opt batch is ${batch.status}; export only after it completes` }, 409);
+    }
   }
   return createExport(c, jobId, kind, body);
 });

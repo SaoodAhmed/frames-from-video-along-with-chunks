@@ -123,7 +123,7 @@
     if (state.filter !== "all") q.set("status", state.filter);
     if (state.search) q.set("search", state.search);
     const body = $("jobs-body");
-    body.innerHTML = `<tr class="loading"><td colspan="10">Loading jobs…</td></tr>`;
+    body.innerHTML = `<tr class="loading"><td colspan="11">Loading jobs…</td></tr>`;
     $("jobs-empty").classList.add("hidden");
     $("jobs-table").classList.remove("hidden");
     try {
@@ -159,6 +159,7 @@
             <button class="btn ghost small act-view" data-id="${j.id}">View</button>
             ${["uploaded", "failed", "cancelled"].includes(j.status) ? `<button class="btn small act-process" data-id="${j.id}">Process</button>` : ""}
             ${j.status === "failed" ? `<button class="btn ghost small act-retry" data-id="${j.id}">Retry</button>` : ""}
+            ${isJobIdle(j) ? `<button class="btn ghost small act-optimize" data-id="${j.id}" title="Manually optimize to any format">Optimize</button>` : ""}
             <button class="btn danger small act-delete" data-id="${j.id}">Delete</button>
           </div>
         </td>`;
@@ -167,6 +168,13 @@
     body.querySelectorAll(".act-view").forEach((b) => b.addEventListener("click", () => openJob(b.dataset.id)));
     body.querySelectorAll(".act-process").forEach((b) => b.addEventListener("click", () => openJob(b.dataset.id)));
     body.querySelectorAll(".act-retry").forEach((b) => b.addEventListener("click", () => retryJob(b.dataset.id)));
+    body.querySelectorAll(".act-optimize").forEach((b) => b.addEventListener("click", async () => {
+      try {
+        const data = await API.request(`/api/jobs/${b.dataset.id}`);
+        state.job = data.job;
+        openOptimizeModal("job", [b.dataset.id]);
+      } catch (err) { alert("Failed to load job: " + err.message); }
+    }));
     body.querySelectorAll(".act-delete").forEach((b) => b.addEventListener("click", () => deleteJob(b.dataset.id)));
     body.querySelectorAll(".job-check").forEach((cb) => cb.addEventListener("change", (e) => {
       if (e.target.checked) state.selectedJobs.add(cb.dataset.id); else state.selectedJobs.delete(cb.dataset.id);
@@ -195,6 +203,12 @@
     if (state.selectedJobs.size === 0) return;
     openOptimizeModal("bulk", [...state.selectedJobs]);
   });
+
+  function isJobIdle(j) {
+    return !["queued", "processing"].includes(j.status)
+      && !["queued", "processing"].includes(j.chunk_status)
+      && !["queued", "processing"].includes(j.optimize_status);
+  }
 
   function renderChunkCell(j) {
     if (!j.chunk_status || j.chunk_status === "none") return '<span class="muted small">—</span>';
@@ -288,11 +302,12 @@
     if (!["queued", "processing"].includes(j.status) && !["queued", "processing"].includes(j.chunk_status)) {
       addBtn(actions, "Split into Chunks", "", splitChunks);
     }
-    // Optimize is an independent step; hidden while frames/chunks are actively
-    // running and while an optimization is already queued/processing. Images
-    // auto-optimize, so the button only appears to retry a failed one.
+    // Optimize is an independent step; hidden only while frames/chunks are
+    // actively running or an optimization is already queued/processing. Images
+    // auto-optimize on upload, so the button reads "Re-optimize" to pick a
+    // different format/quality.
     const optIdle = !["queued", "processing"].includes(j.status) && !["queued", "processing"].includes(j.chunk_status) && !["queued", "processing"].includes(j.optimize_status);
-    if ((j.media_type !== "image" && optIdle) || (j.media_type === "image" && j.optimize_status === "failed")) {
+    if (optIdle) {
       addBtn(actions, j.optimize_status === "completed" ? "Re-optimize" : "Optimize", "ghost", optimizeJob);
     }
     if (j.optimize_status === "completed" && j.optimizedUrl) {
@@ -700,7 +715,7 @@
     try {
       const data = await API.request(`/api/jobs/${j.id}/optimize`, { method: "POST", body });
       state.job = data.job;
-      renderJob();
+      if (!$("view-job").classList.contains("hidden")) renderJob();
       closeOptimizeModal();
       toast("Optimization started.");
     } catch (err) {
