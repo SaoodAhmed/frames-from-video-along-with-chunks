@@ -160,6 +160,7 @@ export async function listAllJobs(
   opts: {
     status?: string;
     search?: string;
+    mediaType?: "image" | "video";
     limit: number;
     offset: number;
   }
@@ -174,6 +175,10 @@ export async function listAllJobs(
   if (opts.search) {
     where.push("(j.original_filename LIKE ? OR u.email LIKE ?)");
     params.push(`%${opts.search}%`, `%${opts.search}%`);
+  }
+  if (opts.mediaType) {
+    where.push("j.media_type = ?");
+    params.push(opts.mediaType);
   }
 
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";

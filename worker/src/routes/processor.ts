@@ -10,7 +10,7 @@ import {
   insertChunk,
   listChunkKeys,
 } from "../db/jobs";
-import { getOptBatch, listFramesByIds, transitionOptBatch, updateOptBatchProgress } from "../db/opt";
+import { getOptBatch, listFramesByIds, transitionOptBatch, updateOptBatchProgress, updateOptimizationResult } from "../db/opt";
 import { r2Keys, userSegmentFromKey, folderSegmentFromKey, IMAGE_EXT } from "../lib/r2";
 import type { ImageFormat } from "../lib/r2";
 import type { Job, ExportKind, Frame, OptBatch } from "../types";
@@ -412,13 +412,27 @@ processor.post("/optimize/complete/:jobId", async (c) => {
   } catch {
     body = {};
   }
-  const ok = await transitionOptimize(c.env.DB, jobId, "processing", "completed", {
+  const extra: Record<string, string | number | null> = {
     optimized_size: typeof body.size === "number" ? body.size : null,
     optimized_duration: typeof body.duration === "number" ? body.duration : null,
-    opt_format: typeof body.format === "string" ? body.format : null,
     error_message: null,
-  });
+  };
+  // Preserve the queued opt_format when the runner omits it (video complete calls
+  // don't post format) so the variant row keeps matching on format.
+  if (typeof body.format === "string" && body.format) extra.opt_format = body.format;
+  const ok = await transitionOptimize(c.env.DB, jobId, "processing", "completed", extra);
   if (!ok) return c.json({ error: "Optimization not completable" }, 409);
+  // Sync the format-specific variant row (identity: job_id + media_type + format).
+  const job = await getJob(c.env.DB, jobId);
+  if (job) {
+    const fmt = (typeof body.format === "string" && body.format) ? body.format : job.opt_format;
+    if (fmt) {
+      await updateOptimizationResult(c.env.DB, jobId, job.media_type, fmt, "completed", {
+        size: typeof body.size === "number" ? body.size : null,
+        duration: typeof body.duration === "number" ? body.duration : null,
+      });
+    }
+  }
   return c.json({ ok: true });
 });
 
@@ -438,6 +452,11 @@ processor.post("/optimize/fail/:jobId", async (c) => {
   )
     .bind(message, new Date().toISOString(), jobId)
     .run();
+  // Mark the variant failed so the gallery shows the real backend state.
+  const job = await getJob(c.env.DB, jobId);
+  if (job && job.opt_format) {
+    await updateOptimizationResult(c.env.DB, jobId, job.media_type, job.opt_format, "failed", { error: message });
+  }
   return c.json({ ok: true });
 });
 

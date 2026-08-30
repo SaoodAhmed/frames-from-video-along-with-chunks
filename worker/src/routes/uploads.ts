@@ -138,7 +138,9 @@ uploads.post("/create", requireAuth, async (c) => {
   }
 
   // Initiate multipart upload on R2.
-  const mpu = await c.env.R2.createMultipartUpload(r2Key);
+  const mpu = await c.env.R2.createMultipartUpload(r2Key, {
+    httpMetadata: { contentType: mimeType || (mediaType === "image" ? "image/jpeg" : "video/mp4") },
+  });
   const partCount = Math.min(Math.max(1, Math.ceil(size / CHUNK_SIZE)), MAX_PARTS);
 
   const host = getR2Host(c.env.R2_ENDPOINT, c.env.R2_BUCKET_NAME);

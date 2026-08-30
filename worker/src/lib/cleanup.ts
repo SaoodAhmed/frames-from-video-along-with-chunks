@@ -47,14 +47,22 @@ export async function deleteJobCompletely(env: Env, jobId: string): Promise<bool
     .all<{ r2_key: string }>();
   for (const e of exports.results ?? []) await Promise.allSettled([env.R2.delete(e.r2_key!)]);
 
+  // Every format-specific variant (each has its own R2 object).
+  const opts = await env.DB
+    .prepare("SELECT r2_key FROM optimizations WHERE job_id = ?")
+    .bind(jobId)
+    .all<{ r2_key: string }>();
+  const optKeys = new Set(opts.results?.map((o) => o.r2_key) ?? []);
+  if (job.optimized_key) optKeys.add(job.optimized_key);
   await Promise.allSettled([
     env.R2.delete(job.r2_video_key),
-    ...(job.optimized_key ? [env.R2.delete(job.optimized_key)] : []),
+    ...[...optKeys].map((k) => env.R2.delete(k)),
     ...(job.optimized_thumb_key ? [env.R2.delete(job.optimized_thumb_key)] : []),
     ...(job.video_thumb_key ? [env.R2.delete(job.video_thumb_key)] : []),
   ]);
 
   await env.DB.prepare("DELETE FROM opt_batches WHERE job_id = ?").bind(jobId).run();
+  await env.DB.prepare("DELETE FROM optimizations WHERE job_id = ?").bind(jobId).run();
   await env.DB.prepare("DELETE FROM jobs WHERE id = ?").bind(jobId).run();
   return true;
 }

@@ -16,7 +16,7 @@ import {
   deleteChunkRows,
   deleteChunkExports,
 } from "../db/jobs";
-import { insertOptBatch, latestCompletedBatch, listFramesByIds, getOptBatch } from "../db/opt";
+import { insertOptBatch, latestCompletedBatch, listFramesByIds, getOptBatch, upsertOptimization } from "../db/opt";
 import { PRESETS } from "../types";
 import type { Frame, JwtUser, Chunk, ExportKind } from "../types";
 import { r2Keys, userSegmentFromKey, folderSegmentFromKey } from "../lib/r2";
@@ -511,19 +511,19 @@ jobs.post("/:id/optimize", requireAdmin, async (c) => {
     return c.json({ error: `Optimization is already ${job.optimize_status}` }, 409);
   }
 
-  // Re-optimizing replaces the previous output entirely.
-  for (const key of [job.optimized_key, job.optimized_thumb_key]) {
-    if (key) await Promise.allSettled([c.env.R2.delete(key)]);
-  }
-
+  // Re-optimizing upserts the (job, format) variant: same-format re-runs
+  // overwrite that one object, other formats' variants are left untouched.
   const seg = userSegmentFromKey(job.r2_video_key);
   const folder = folderSegmentFromKey(job.r2_video_key);
   const optContainer = container ?? (codec === "libsvtav1" ? "webm" : "mp4");
-  const optFormat = format ?? (isImage ? "webp" : null);
+  const optFormat = isImage ? (format ?? "webp") : optContainer;
   const optimizedKey = isImage
     ? r2Keys.optimizedImage(seg, folder, jobId, optFormat!)
     : r2Keys.optimizedVideo(seg, folder, jobId, optContainer as "mp4" | "mkv" | "webm");
   const thumbKey = isImage ? r2Keys.thumbImage(seg, folder, jobId) : null;
+  await upsertOptimization(c.env.DB, isImage
+    ? { jobId, mediaType: "image", format: optFormat!, quality, maxDim, r2Key: optimizedKey }
+    : { jobId, mediaType: "video", format: optContainer, codec: codec ?? "libx264", crf, maxDim, r2Key: optimizedKey });
   const ok = await transitionOptimize(c.env.DB, jobId, job.optimize_status, "queued", {
     opt_crf: isImage ? null : crf,
     opt_max_dim: maxDim,

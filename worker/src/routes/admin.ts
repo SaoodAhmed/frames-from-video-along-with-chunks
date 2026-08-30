@@ -4,6 +4,10 @@ import { S3_REGION } from "../env";
 import { getR2Host, presignGet } from "../lib/s3";
 import { requireAdmin } from "../middleware/auth";
 import { listAllJobs, countJobsByStatus, getJob, transitionOptimize, listUserJobsFiltered } from "../db/jobs";
+import {
+  upsertOptimization, listOptimizationFormats, getOptimizationById,
+  deleteOptimizationById, listFramesByIds,
+} from "../db/opt";
 import { r2Keys, userSegmentFromKey, folderSegmentFromKey, IMAGE_FORMATS, VIDEO_CONTAINERS } from "../lib/r2";
 import type { ImageFormat } from "../lib/r2";
 import { deleteJobCompletely } from "../lib/cleanup";
@@ -13,20 +17,54 @@ import { notifyProcessors } from "./jobs";
 
 const admin = new Hono<{ Bindings: Env; Variables: { user: JwtUser } }>();
 
-// GET /videos — admin list of all jobs (filterable)
+// GET /videos — admin list of all jobs (filterable), each enriched with presigned
+// original/thumb/optimized URLs so the Media gallery renders directly.
 admin.get("/videos", requireAdmin, async (c) => {
   const page = Math.max(1, parseInt(c.req.query("page") || "1", 10) || 1);
-  const perPage = Math.min(100, Math.max(1, parseInt(c.req.query("perPage") || "20", 10) || 20));
+  const perPage = Math.min(200, Math.max(1, parseInt(c.req.query("perPage") || "60", 10) || 60));
   const status = c.req.query("status") || undefined;
   const search = c.req.query("search") || undefined;
+  const type = c.req.query("type");
+  const mediaType = type === "image" ? "image" : type === "video" ? "video" : undefined;
 
   const { rows, total } = await listAllJobs(c.env.DB, {
     status,
     search,
+    mediaType,
     limit: perPage,
     offset: (page - 1) * perPage,
   });
-  return c.json({ jobs: rows, total, page, perPage });
+
+  const host = getR2Host(c.env.R2_ENDPOINT, c.env.R2_BUCKET_NAME);
+  const jobs = await Promise.all(
+    rows.map(async (j) => {
+      const isImage = j.media_type === "image";
+      const originalUrl = await presignGet(c.env.R2_ACCESS_KEY_ID, c.env.R2_SECRET_ACCESS_KEY, S3_REGION, host, j.r2_video_key, 3600);
+      if (isImage) {
+        if (j.optimize_status !== "completed") return { ...j, originalUrl };
+        const [thumbUrl, optimizedUrl] = await Promise.all([
+          j.optimized_thumb_key
+            ? presignGet(c.env.R2_ACCESS_KEY_ID, c.env.R2_SECRET_ACCESS_KEY, S3_REGION, host, j.optimized_thumb_key, 900)
+            : null,
+          j.optimized_key
+            ? presignGet(c.env.R2_ACCESS_KEY_ID, c.env.R2_SECRET_ACCESS_KEY, S3_REGION, host, j.optimized_key, 900)
+            : null,
+        ]);
+        return { ...j, originalUrl, thumbUrl, optimizedUrl };
+      }
+      const [videoThumbUrl, optimizedUrl] = await Promise.all([
+        j.video_thumb_key
+          ? presignGet(c.env.R2_ACCESS_KEY_ID, c.env.R2_SECRET_ACCESS_KEY, S3_REGION, host, j.video_thumb_key, 900)
+          : null,
+        j.optimize_status === "completed" && j.optimized_key
+          ? presignGet(c.env.R2_ACCESS_KEY_ID, c.env.R2_SECRET_ACCESS_KEY, S3_REGION, host, j.optimized_key, 900)
+          : null,
+      ]);
+      return { ...j, originalUrl, videoThumbUrl, optimizedUrl };
+    })
+  );
+
+  return c.json({ jobs, total, page, perPage });
 });
 
 // GET /jobs?userId=&folderId=&type=&page=&perPage= — a specific user's jobs,
@@ -144,18 +182,19 @@ admin.post("/optimize-batch", requireAdmin, async (c) => {
         ? Math.round(options.maxDim)
         : null;
 
-    for (const key of [job.optimized_key, job.optimized_thumb_key]) {
-      if (key) await Promise.allSettled([c.env.R2.delete(key)]);
-    }
-
+    // Variant upsert: re-optimizing a format overwrites that format only; other
+    // formats' variants are left untouched (no cross-format R2 deletion).
     const seg = userSegmentFromKey(job.r2_video_key);
     const folder = folderSegmentFromKey(job.r2_video_key);
     const optContainer = container ?? (codec === "libsvtav1" ? "webm" : "mp4");
-    const optFormat = format ?? (isImage ? "webp" : null);
+    const optFormat = isImage ? (format ?? "webp") : optContainer;
     const optimizedKey = isImage
       ? r2Keys.optimizedImage(seg, folder, jobId, optFormat!)
       : r2Keys.optimizedVideo(seg, folder, jobId, optContainer as "mp4" | "mkv" | "webm");
     const thumbKey = isImage ? r2Keys.thumbImage(seg, folder, jobId) : null;
+    await upsertOptimization(c.env.DB, isImage
+      ? { jobId, mediaType: "image", format: optFormat!, quality, maxDim, r2Key: optimizedKey }
+      : { jobId, mediaType: "video", format: optContainer, codec: codec ?? "libx264", crf, maxDim, r2Key: optimizedKey });
 
     const ok = await transitionOptimize(c.env.DB, jobId, job.optimize_status, "queued", {
       opt_crf: isImage ? null : crf,
@@ -322,53 +361,220 @@ admin.delete("/folders/:id", requireAdmin, async (c) => {
   return c.json({ ok: true, deleted: res });
 });
 
-// GET /optimized — optimization gallery: completed job optimizations (before/
-// after sizes, format, saved %) + recent frame-opt batches.
-admin.get("/optimized", requireAdmin, async (c) => {
-  const jobs = await c.env.DB
-    .prepare(
-      `SELECT j.id, j.original_filename, j.user_id, u.email AS user_email, j.media_type,
-         j.file_size, j.optimized_size, j.opt_format, j.opt_container, j.opt_codec,
-         j.optimized_key, j.optimized_thumb_key, j.video_thumb_key, j.optimize_status,
-         j.updated_at
-       FROM jobs j LEFT JOIN users u ON u.id = j.user_id
-       WHERE j.optimize_status = 'completed' ORDER BY j.updated_at DESC LIMIT 300`
-    )
-    .all<{
-      id: string; original_filename: string; user_id: string; user_email: string; media_type: string;
-      file_size: number | null; optimized_size: number | null; opt_format: string | null;
-      opt_container: string | null; opt_codec: string | null; optimized_key: string | null;
-      optimized_thumb_key: string | null; video_thumb_key: string | null; optimize_status: string;
-      updated_at: string;
-    }>();
+// ── Processing galleries (data-driven, dynamic tabs) ─────────────────────────
 
-  const batches = await c.env.DB
-    .prepare(
-      `SELECT b.id, b.job_id, b.format, b.status, b.total, b.processed, b.error_message,
-         b.completed_at, j.original_filename, j.user_id, u.email AS user_email
-       FROM opt_batches b LEFT JOIN jobs j ON j.id = b.job_id LEFT JOIN users u ON u.id = j.user_id
-       ORDER BY b.created_at DESC LIMIT 100`
-    )
-    .all();
-
+// GET /optimizations?format= — format-independent optimization variants.
+// Formats come from completed variants (dynamic tabs); items are the variants
+// with original size + output size + saved % + playable/preview URL.
+admin.get("/optimizations", requireAdmin, async (c) => {
+  const formatFilter = c.req.query("format");
+  const formats = await listOptimizationFormats(c.env.DB);
   const host = getR2Host(c.env.R2_ENDPOINT, c.env.R2_BUCKET_NAME);
-  const jobsWithUrl = await Promise.all(
-    (jobs.results ?? []).map(async (j) => {
-      const optimizedUrl = j.optimized_key
-        ? await presignGet(c.env.R2_ACCESS_KEY_ID, c.env.R2_SECRET_ACCESS_KEY, S3_REGION, host, j.optimized_key, 900)
-        : null;
-      const thumbKey = j.media_type === "image" ? j.optimized_thumb_key : j.video_thumb_key;
-      const thumbUrl = thumbKey
-        ? await presignGet(c.env.R2_ACCESS_KEY_ID, c.env.R2_SECRET_ACCESS_KEY, S3_REGION, host, thumbKey, 900)
-        : null;
-      const savedPct = j.file_size && j.optimized_size
-        ? Math.max(0, Math.round((1 - j.optimized_size / j.file_size) * 100))
-        : null;
-      return { ...j, optimizedUrl, thumbUrl, savedPct };
+
+  const base = `SELECT o.id, o.job_id, o.media_type, o.format, o.codec, o.crf, o.quality,
+       o.max_dim, o.r2_key, o.size, o.duration, o.status, o.error_message, o.updated_at,
+       j.original_filename, j.file_size, j.optimized_thumb_key, j.video_thumb_key, j.user_id,
+       u.email AS user_email
+    FROM optimizations o
+    LEFT JOIN jobs j ON j.id = o.job_id
+    LEFT JOIN users u ON u.id = j.user_id
+    WHERE o.status = 'completed'`;
+  const rows = formatFilter
+    ? await c.env.DB.prepare(`${base} AND o.format = ? ORDER BY o.updated_at DESC LIMIT 300`).bind(formatFilter).all<Record<string, unknown>>()
+    : await c.env.DB.prepare(`${base} ORDER BY o.updated_at DESC LIMIT 300`).all<Record<string, unknown>>();
+
+  const items = await Promise.all(
+    (rows.results ?? []).map(async (o) => {
+      const thumbKey = o.media_type === "image" ? o.optimized_thumb_key : o.video_thumb_key;
+      const [thumbUrl, url] = await Promise.all([
+        thumbKey
+          ? presignGet(c.env.R2_ACCESS_KEY_ID, c.env.R2_SECRET_ACCESS_KEY, S3_REGION, host, thumbKey as string, 900)
+          : null,
+        presignGet(c.env.R2_ACCESS_KEY_ID, c.env.R2_SECRET_ACCESS_KEY, S3_REGION, host, o.r2_key as string, 900),
+      ]);
+      const orig = Number(o.file_size) || 0;
+      const out = Number(o.size) || 0;
+      const savedPct = orig && out ? Math.max(0, Math.round((1 - out / orig) * 100)) : null;
+      return { ...o, thumbUrl, url, savedPct };
     })
   );
 
-  return c.json({ jobs: jobsWithUrl, batches: batches.results ?? [] });
+  return c.json({ formats, items });
+});
+
+// DELETE /optimizations/:id — delete one variant (R2 object + row).
+admin.delete("/optimizations/:id", requireAdmin, async (c) => {
+  const opt = await getOptimizationById(c.env.DB, c.req.param("id"));
+  if (!opt) return c.json({ error: "Not found" }, 404);
+  await Promise.allSettled([c.env.R2.delete(opt.r2_key)]);
+  await deleteOptimizationById(c.env.DB, opt.id);
+  // If it was the job's "current" optimized output, clear the stale pointer.
+  const job = await getJob(c.env.DB, opt.job_id);
+  if (job && job.optimized_key === opt.r2_key) {
+    await c.env.DB
+      .prepare("UPDATE jobs SET optimized_key = NULL, optimize_status = 'none', updated_at = ? WHERE id = ?")
+      .bind(new Date().toISOString(), opt.job_id)
+      .run();
+  }
+  return c.json({ ok: true, deleted: opt.id });
+});
+
+// GET /chunk-groups?videoId= — chunks grouped by parent video (dynamic tabs).
+admin.get("/chunk-groups", requireAdmin, async (c) => {
+  const videoId = c.req.query("videoId") || "";
+  const host = getR2Host(c.env.R2_ENDPOINT, c.env.R2_BUCKET_NAME);
+  const groups = await c.env.DB
+    .prepare(
+      `SELECT c.job_id, j.original_filename AS title, COUNT(*) AS count
+       FROM chunks c JOIN jobs j ON j.id = c.job_id
+       WHERE c.deleted = 0 GROUP BY c.job_id ORDER BY j.original_filename`
+    )
+    .all<{ job_id: string; title: string; count: number }>();
+
+  const where = videoId ? "AND c.job_id = ?" : "";
+  const rows = await c.env.DB
+    .prepare(
+      `SELECT c.id, c.job_id, c.chunk_number, c.start_sec, c.end_sec, c.duration, c.r2_key,
+         c.file_size, c.width, c.height, c.created_at
+       FROM chunks c JOIN jobs j ON j.id = c.job_id
+       WHERE c.deleted = 0 ${where} ORDER BY c.job_id, c.chunk_number ASC LIMIT 2000`
+    )
+    .bind(...(videoId ? [videoId] : []))
+    .all<{
+      id: string; job_id: string; chunk_number: number; start_sec: number; end_sec: number;
+      duration: number; r2_key: string; file_size: number; width: number | null; height: number | null; created_at: string;
+    }>();
+
+  const chunks = await Promise.all(
+    (rows.results ?? []).map(async (ch) => ({
+      ...ch,
+      playUrl: await presignGet(c.env.R2_ACCESS_KEY_ID, c.env.R2_SECRET_ACCESS_KEY, S3_REGION, host, ch.r2_key, 900),
+    }))
+  );
+  return c.json({ groups: groups.results ?? [], chunks });
+});
+
+// GET /frame-groups?videoId= — extracted frames grouped by source video (dynamic tabs).
+admin.get("/frame-groups", requireAdmin, async (c) => {
+  const videoId = c.req.query("videoId") || "";
+  const host = getR2Host(c.env.R2_ENDPOINT, c.env.R2_BUCKET_NAME);
+  const groups = await c.env.DB
+    .prepare(
+      `SELECT fr.job_id, j.original_filename AS title, COUNT(*) AS count
+       FROM frames fr JOIN jobs j ON j.id = fr.job_id
+       WHERE fr.deleted = 0 GROUP BY fr.job_id ORDER BY j.original_filename`
+    )
+    .all<{ job_id: string; title: string; count: number }>();
+
+  const where = videoId ? "AND fr.job_id = ?" : "";
+  const rows = await c.env.DB
+    .prepare(
+      `SELECT fr.id, fr.job_id, fr.frame_number, fr.source_frame_number, fr.timestamp, fr.r2_key,
+         fr.width, fr.height, fr.created_at
+       FROM frames fr JOIN jobs j ON j.id = fr.job_id
+       WHERE fr.deleted = 0 ${where} ORDER BY fr.job_id, fr.frame_number ASC LIMIT 4000`
+    )
+    .bind(...(videoId ? [videoId] : []))
+    .all<{
+      id: string; job_id: string; frame_number: number; source_frame_number: number; timestamp: number;
+      r2_key: string; width: number; height: number; created_at: string;
+    }>();
+
+  const frames = await Promise.all(
+    (rows.results ?? []).map(async (f) => {
+      const [thumbUrl, fullUrl] = await Promise.all([
+        presignGet(c.env.R2_ACCESS_KEY_ID, c.env.R2_SECRET_ACCESS_KEY, S3_REGION, host, f.r2_key.replace("/frames/full/", "/frames/thumbs/"), 900),
+        presignGet(c.env.R2_ACCESS_KEY_ID, c.env.R2_SECRET_ACCESS_KEY, S3_REGION, host, f.r2_key, 900),
+      ]);
+      return { ...f, thumbUrl, fullUrl };
+    })
+  );
+  return c.json({ groups: groups.results ?? [], frames });
+});
+
+// GET /optframes?format= — optimized frame images (separate gallery). Derived
+// from completed opt_batches; format tabs are the distinct batch formats.
+admin.get("/optframes", requireAdmin, async (c) => {
+  const formatFilter = c.req.query("format");
+  const host = getR2Host(c.env.R2_ENDPOINT, c.env.R2_BUCKET_NAME);
+  const formats = await c.env.DB
+    .prepare(`SELECT format, COUNT(*) AS count FROM opt_batches WHERE status = 'completed' GROUP BY format ORDER BY format`)
+    .all<{ format: string; count: number }>();
+
+  const batches = await c.env.DB
+    .prepare(
+      `SELECT b.id, b.job_id, b.format, b.quality, b.max_dim, b.frame_ids, b.completed_at,
+         j.original_filename, j.user_id, u.email AS user_email
+       FROM opt_batches b
+       LEFT JOIN jobs j ON j.id = b.job_id
+       LEFT JOIN users u ON u.id = j.user_id
+       WHERE b.status = 'completed' ORDER BY b.completed_at DESC LIMIT 100`
+    )
+    .all<{
+      id: string; job_id: string; format: string; quality: number; max_dim: number | null;
+      frame_ids: string; completed_at: string | null; original_filename: string | null;
+      user_id: string; user_email: string | null;
+    }>();
+
+  const items: Array<Record<string, unknown>> = [];
+  for (const b of batches.results ?? []) {
+    if (formatFilter && b.format !== formatFilter) continue;
+    const job = await getJob(c.env.DB, b.job_id);
+    if (!job) continue;
+    const seg = userSegmentFromKey(job.r2_video_key);
+    const folder = folderSegmentFromKey(job.r2_video_key);
+    const frameIds = JSON.parse(b.frame_ids) as string[];
+    const frames = await listFramesByIds(c.env.DB, b.job_id, frameIds);
+    const fmt = b.format as ImageFormat;
+    for (const f of frames) {
+      const key = r2Keys.optimizedFrame(seg, folder, b.job_id, fmt, f.frame_number);
+      const head = await c.env.R2.head(key);
+      items.push({
+        id: `${b.id}:${f.id}`,
+        job_id: b.job_id,
+        frame_number: f.frame_number,
+        width: f.width,
+        height: f.height,
+        format: b.format,
+        quality: b.quality,
+        size: head?.size ?? null,
+        filename: `${b.original_filename ?? "video"} — frame ${String(f.frame_number).padStart(4, "0")}`,
+        user_email: b.user_email,
+        url: await presignGet(c.env.R2_ACCESS_KEY_ID, c.env.R2_SECRET_ACCESS_KEY, S3_REGION, host, key, 900),
+        thumbUrl: await presignGet(c.env.R2_ACCESS_KEY_ID, c.env.R2_SECRET_ACCESS_KEY, S3_REGION, host, key, 900),
+      });
+    }
+    if (items.length > 2000) break;
+  }
+
+  return c.json({ formats: formats.results ?? [], items });
+});
+
+// POST /optframes/delete {job_id, format, frameNumbers[]} — delete optimized
+// frame objects of one format for the given frame numbers.
+admin.post("/optframes/delete", requireAdmin, async (c) => {
+  let body: { jobId?: unknown; format?: unknown; frameNumbers?: unknown };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "Invalid JSON body" }, 400);
+  }
+  const jobId = typeof body.jobId === "string" ? body.jobId : "";
+  const format = typeof body.format === "string" ? body.format : "";
+  const frameNumbers = Array.isArray(body.frameNumbers)
+    ? body.frameNumbers.filter((x): x is number => typeof x === "number" && Number.isInteger(x))
+    : [];
+  if (!jobId || !format || !frameNumbers.length) return c.json({ error: "jobId, format, frameNumbers required" }, 400);
+
+  const job = await getJob(c.env.DB, jobId);
+  if (!job) return c.json({ error: "Not found" }, 404);
+  const seg = userSegmentFromKey(job.r2_video_key);
+  const folder = folderSegmentFromKey(job.r2_video_key);
+  const fmt = format as ImageFormat;
+  for (const n of frameNumbers) {
+    await Promise.allSettled([c.env.R2.delete(r2Keys.optimizedFrame(seg, folder, jobId, fmt, n))]);
+  }
+  return c.json({ ok: true, deleted: frameNumbers.length });
 });
 
 export default admin;

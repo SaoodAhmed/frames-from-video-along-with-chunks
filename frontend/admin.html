@@ -39,14 +39,20 @@
         <span class="ver">ADMIN</span>
       </div>
       <div class="nav">
-        <a href="#" data-filter="all" class="active">Dashboard</a>
-        <a href="#" data-filter="uploaded">Uploads</a>
-        <a href="#" data-filter="queued">Processing</a>
-        <a href="#" data-filter="completed">Completed</a>
-        <a href="#" data-filter="failed">Failed</a>
-        <div class="nav-divider"></div>
+        <a href="#" data-view="dashboard" class="active">Dashboard</a>
         <a href="#" data-view="users">Users</a>
-        <a href="#" data-view="optimized">Optimization Gallery</a>
+        <a href="#" data-view="media">Media</a>
+        <div class="nav-sub" id="media-subnav">
+          <a href="#" data-view="media" data-type="all">All</a>
+          <a href="#" data-view="media" data-type="image">Images</a>
+          <a href="#" data-view="media" data-type="video">Videos</a>
+        </div>
+        <div class="nav-divider"></div>
+        <div class="nav-label">Processing</div>
+        <a href="#" data-view="optimized">Optimization</a>
+        <a href="#" data-view="chunks">Chunks</a>
+        <a href="#" data-view="frames">Frames</a>
+        <a href="#" data-view="optframes">Optimized Frames</a>
       </div>
       <div class="sidebar-footer">
         <div class="user-email" id="user-email"></div>
@@ -55,7 +61,7 @@
     </aside>
 
     <main class="main">
-      <!-- Videos table view -->
+      <!-- Dashboard: backend-backed processing status -->
       <div id="view-videos">
         <div class="toolbar">
           <h1 id="view-title">Dashboard</h1>
@@ -82,14 +88,8 @@
           <div class="stat-card">
             <div class="stat-label"><span class="dot dot-soft"></span>Total</div>
             <div class="stat-value" id="stat-total">0</div>
-            <div class="stat-sub">all videos on the platform</div>
+            <div class="stat-sub">all media on the platform</div>
           </div>
-        </div>
-
-        <div id="bulk-bar" class="bulk-bar hidden">
-          <span class="pager-info" id="bulk-count">0 selected</span>
-          <button class="btn small" id="bulk-optimize" type="button">Optimize Selected</button>
-          <button class="btn ghost small" id="bulk-clear" type="button">Clear</button>
         </div>
 
         <div id="jobs-empty" class="empty-state hidden">
@@ -101,9 +101,8 @@
           <table>
             <thead>
               <tr>
-                <th style="width:30px;"><input type="checkbox" id="jobs-select-all" title="Select all on this page" /></th>
                 <th>User</th><th>Filename</th><th>Size</th><th>Duration</th>
-                <th>Resolution</th><th>Uploaded</th><th>Status</th><th>Frames</th><th>Chunks</th><th>Actions</th>
+                <th>Resolution</th><th>Uploaded</th><th>Status</th><th>Frames</th><th>Chunks</th><th>Optimize</th><th>Actions</th>
               </tr>
             </thead>
             <tbody id="jobs-body"></tbody>
@@ -116,122 +115,40 @@
         </div>
       </div>
 
-      <!-- Job detail view -->
-      <div id="view-job" class="hidden">
+      <!-- Media gallery (all users, gallery-based) -->
+      <div id="view-media" class="hidden">
         <div class="toolbar">
-          <button class="btn ghost small" id="back-btn" type="button">← Back</button>
-          <h1 id="job-title">Job</h1>
-          <span class="badge" id="job-status-badge"></span>
-          <span class="badge" id="optimize-status-badge"></span>
-        </div>
-
-        <!-- Job info -->
-        <div class="card mb-20">
-          <div class="meta-grid" id="job-meta"></div>
-          <div class="divider"></div>
-          <div class="row gap-8" id="job-actions"></div>
-          <div class="auth-err" id="job-err"></div>
-        </div>
-
-        <!-- Process config -->
-        <div class="card mb-20" id="process-panel">
-          <h3>Extraction Settings</h3>
-          <div class="row gap-8 mt-12">
-            <label class="muted small">Mode:</label>
-            <select id="mode-select" class="input" style="max-width:200px;">
-              <option value="Every Frame">Every Frame</option>
-              <option value="10 fps">10 fps</option>
-              <option value="5 fps">5 fps</option>
-              <option value="3 fps">3 fps</option>
-              <option value="2 fps">2 fps</option>
-              <option value="1 fps" selected>1 fps</option>
-              <option value="Smart Scene">Smart Scene</option>
-              <option value="1 per 5 s">1 per 5 s</option>
-              <option value="Thumb Strip">Thumb Strip</option>
-              <option value="Custom FPS">Custom FPS</option>
-            </select>
-            <div id="custom-fps-wrap" class="hidden">
-              <label class="muted small">FPS:</label>
-              <input id="custom-fps" class="input" type="number" min="0.1" max="120" step="0.5" value="1" style="width:90px;" />
-            </div>
-          </div>
-          <div class="row gap-8 mt-12">
-            <label class="muted small">Sharpness: <span id="sharp-val">1.0</span></label>
-            <input id="sharpness" type="range" min="0.5" max="3.0" step="0.1" value="1.0" style="width:220px;" />
-            <label class="muted small">Scene threshold: <span id="scene-val">30</span></label>
-            <input id="scene-threshold" type="range" min="5" max="80" step="1" value="30" style="width:220px;" />
-          </div>
-          <button class="btn mt-12" id="start-process" type="button">Start Processing</button>
-        </div>
-
-        <!-- Progress -->
-        <div class="card mb-20 hidden" id="progress-panel">
-          <div class="card-header">
-            <h3>Progress</h3>
-            <span class="badge" id="progress-status-badge"></span>
-          </div>
-          <div class="progress"><span id="progress-bar"></span></div>
-          <div class="progress-bar-label" id="progress-label"></div>
-          <div class="mt-12 progress" style="display:none;" id="chunk-progress-wrap">
-            <span id="chunk-progress-bar"></span>
-          </div>
-          <div class="progress-bar-label" id="chunk-progress-label" style="display:none;"></div>
-        </div>
-
-        <!-- Frame gallery -->
-        <div class="card" id="gallery-panel">
-          <div class="toolbar">
-            <h3>Frame Gallery</h3>
-            <span class="toolbar-note">extracted frames</span>
-            <div class="spacer"></div>
-            <span class="pager-info" id="sel-count">0 selected</span>
-            <button class="btn ghost small" id="select-all" type="button">Select all</button>
-            <button class="btn ghost small" id="deselect-all" type="button">Deselect</button>
-            <button class="btn small hidden" id="optimize-selected-frames" type="button">Optimize Selected Frames</button>
-            <span class="pager-info hidden" id="opt-batch-info"></span>
-            <button class="btn ghost small hidden" id="opt-toggle" type="button">Original / Optimized</button>
-            <button class="btn small hidden" id="opt-export-zip" type="button">Export Optimized ZIP</button>
-            <button class="btn danger small" id="delete-selected" type="button">Delete selected</button>
-            <button class="btn small" id="export-all" type="button">ZIP all</button>
-            <button class="btn small" id="export-selected" type="button">ZIP selected</button>
-          </div>
-          <div id="gallery-empty" class="empty-state hidden">
-            <div class="empty-icon">🖼️</div>
-            <div>No frames extracted yet.</div>
-            <div class="empty-cta"><button class="btn small" id="empty-start-process" type="button">Start processing</button></div>
-          </div>
-          <div class="gallery" id="gallery"></div>
-          <div class="pager" id="gallery-pager">
-            <button class="btn ghost small" id="gal-prev" type="button">‹ Prev</button>
-            <span class="pager-info" id="gal-info">0 frames</span>
-            <button class="btn ghost small" id="gal-next" type="button">Next ›</button>
+          <h1 id="media-title">Media</h1>
+          <span class="toolbar-note" id="media-note">—</span>
+          <div class="spacer"></div>
+          <div class="tabs" id="media-tabs">
+            <button data-type="all" class="active" type="button">All</button>
+            <button data-type="image" type="button">Images</button>
+            <button data-type="video" type="button">Videos</button>
           </div>
         </div>
 
-        <!-- Chunks (scene-based split) -->
-        <div class="card" id="chunks-panel">
-          <div class="toolbar">
-            <h3>Scene Chunks</h3>
-            <span class="badge" id="chunk-status-badge" style="margin-left:8px;"></span>
-            <div class="spacer"></div>
-            <span class="pager-info" id="chunk-sel-count">0 selected</span>
-            <button class="btn ghost small" id="chunk-select-all" type="button">Select all</button>
-            <button class="btn ghost small" id="chunk-deselect-all" type="button">Deselect</button>
-            <button class="btn danger small" id="chunk-delete-selected" type="button">Delete selected</button>
-            <button class="btn small" id="chunk-export-all" type="button">ZIP all</button>
-            <button class="btn small" id="chunk-export-selected" type="button">ZIP selected</button>
-          </div>
-          <div id="chunks-empty" class="empty-state hidden">
-            <div class="empty-icon">✂️</div>
-            <div>No chunks yet. Split this video by background change.</div>
-            <div class="empty-cta"><button class="btn small" id="empty-split" type="button">Split into Chunks</button></div>
-          </div>
-          <div class="gallery" id="chunks-gallery"></div>
-          <div class="pager" id="chunks-pager">
-            <button class="btn ghost small" id="chunk-prev" type="button">‹ Prev</button>
-            <span class="pager-info" id="chunk-info">0 chunks</span>
-            <button class="btn ghost small" id="chunk-next" type="button">Next ›</button>
-          </div>
+        <div id="media-selection-bar" class="selection-bar hidden">
+          <span id="media-sel-count">0 selected</span>
+          <div class="spacer"></div>
+          <button class="btn ghost small" id="media-sel-all" type="button">Select all</button>
+          <button class="btn ghost small" id="media-sel-none" type="button">Deselect</button>
+          <button class="btn small" id="media-opt" type="button">Optimize</button>
+          <button class="btn small hidden" id="media-extract" type="button">Extract Frames</button>
+          <button class="btn small hidden" id="media-chunk" type="button">Chunk</button>
+          <button class="btn small" id="media-download" type="button">Download</button>
+          <button class="btn small danger" id="media-delete" type="button">Delete</button>
+        </div>
+
+        <div id="media-empty" class="empty-state hidden">
+          <div class="empty-icon">🗂️</div>
+          <div id="media-empty-text">No media yet.</div>
+        </div>
+        <div id="media-gallery" class="gallery media-gallery hidden"></div>
+        <div class="pager">
+          <button class="btn ghost small" id="media-prev" type="button">‹ Prev</button>
+          <span class="pager-info" id="media-page-info">Page 1</span>
+          <button class="btn ghost small" id="media-next" type="button">Next ›</button>
         </div>
       </div>
 
@@ -246,7 +163,7 @@
         <div id="users-body"></div>
       </div>
 
-      <!-- Optimization gallery view -->
+      <!-- Optimization Gallery -->
       <div id="view-optimized" class="hidden">
         <div class="toolbar">
           <h1>Optimization Gallery</h1>
@@ -254,15 +171,61 @@
           <div class="spacer"></div>
           <button class="btn ghost small" id="optgal-refresh" type="button">Refresh</button>
         </div>
-        <h3 style="margin-top:4px;">Completed Jobs</h3>
-        <div id="optgal-jobs" class="gallery media-gallery mt-12"></div>
-        <h3 class="mt-20">Frame-Optimization Batches</h3>
-        <div id="optgal-batches" class="mt-12"></div>
+        <div class="tabs mt-12" id="optgal-tabs"></div>
+        <div id="optgal-empty" class="empty-state hidden">
+          <div class="empty-icon">⚡</div>
+          <div>No completed optimizations yet.</div>
+        </div>
+        <div id="optgal-grid" class="gallery media-gallery mt-12"></div>
+      </div>
+
+      <!-- Chunks Gallery -->
+      <div id="view-chunks" class="hidden">
+        <div class="toolbar">
+          <h1>Chunks Gallery</h1>
+          <span class="toolbar-note" id="chunks-note"></span>
+        </div>
+        <div class="tabs mt-12" id="chunks-tabs"></div>
+        <div id="chunks-empty" class="empty-state hidden">
+          <div class="empty-icon">✂️</div>
+          <div>No chunks yet. Chunk a video from the Media gallery.</div>
+        </div>
+        <div id="chunks-grid" class="gallery media-gallery mt-12"></div>
+      </div>
+
+      <!-- Frames Gallery -->
+      <div id="view-frames" class="hidden">
+        <div class="toolbar">
+          <h1>Frames Gallery</h1>
+          <span class="toolbar-note" id="frames-note"></span>
+          <div class="spacer"></div>
+          <button class="btn ghost small hidden" id="frames-zip" type="button">ZIP current video frames</button>
+        </div>
+        <div class="tabs mt-12" id="frames-tabs"></div>
+        <div id="frames-empty" class="empty-state hidden">
+          <div class="empty-icon">🖼️</div>
+          <div>No frames extracted yet. Extract frames from the Media gallery.</div>
+        </div>
+        <div id="frames-grid" class="gallery media-gallery mt-12"></div>
+      </div>
+
+      <!-- Optimized Frames Gallery -->
+      <div id="view-optframes" class="hidden">
+        <div class="toolbar">
+          <h1>Optimized Frames Gallery</h1>
+          <span class="toolbar-note" id="optframes-note"></span>
+        </div>
+        <div class="tabs mt-12" id="optframes-tabs"></div>
+        <div id="optframes-empty" class="empty-state hidden">
+          <div class="empty-icon">🖼️</div>
+          <div>No optimized frames yet.</div>
+        </div>
+        <div id="optframes-grid" class="gallery media-gallery mt-12"></div>
       </div>
     </main>
   </div>
 
-  <!-- Optimize options modal (job / bulk / frames) -->
+  <!-- Optimize options modal -->
   <div class="modal-backdrop hidden" id="optimize-modal">
     <div class="modal" style="max-width:540px;">
       <div class="modal-header">
@@ -340,6 +303,41 @@
     </div>
   </div>
 
+  <!-- Extract frames modal -->
+  <div class="modal-backdrop hidden" id="extract-modal">
+    <div class="modal" style="max-width:440px;">
+      <div class="modal-header">
+        <h3>Extract Frames</h3>
+        <button class="btn ghost small" id="extract-close" type="button">Close</button>
+      </div>
+      <div class="modal-body">
+        <div class="field">
+          <label>Preset</label>
+          <select id="extract-mode" class="input">
+            <option value="Every Frame">Every Frame</option>
+            <option value="10 fps">10 fps</option>
+            <option value="5 fps">5 fps</option>
+            <option value="3 fps">3 fps</option>
+            <option value="2 fps">2 fps</option>
+            <option value="1 fps" selected>1 fps</option>
+            <option value="Smart Scene">Smart Scene</option>
+            <option value="1 per 5 s">1 per 5 s</option>
+            <option value="Thumb Strip">Thumb Strip</option>
+            <option value="Custom FPS">Custom FPS</option>
+          </select>
+        </div>
+        <div class="field hidden" id="extract-fps-wrap">
+          <label>Custom FPS</label>
+          <input id="extract-fps" class="input" type="number" min="0.1" max="120" step="0.5" value="1" />
+        </div>
+        <div class="auth-err" id="extract-err"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" id="extract-submit" type="button">Start Extraction</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Export status modal -->
   <div class="modal-backdrop hidden" id="export-modal">
     <div class="modal">
@@ -357,15 +355,15 @@
     </div>
   </div>
 
-  <!-- Frame preview modal -->
+  <!-- Preview modal (image + video) -->
   <div class="modal-backdrop hidden" id="preview-modal">
-    <div class="modal">
+    <div class="modal" style="max-width:900px;">
       <div class="modal-header">
-        <h3 id="preview-title">Frame Preview</h3>
+        <h3 id="preview-title">Preview</h3>
         <button class="btn ghost small" id="preview-close" type="button">Close</button>
       </div>
       <div class="modal-body">
-        <div class="preview-img-wrap"><img id="preview-img" alt="frame" /></div>
+        <div class="preview-img-wrap"><img id="preview-img" class="hidden" alt="preview" /><video id="preview-video" class="hidden" controls playsinline></video></div>
         <div class="pager" id="preview-pager">
           <button class="btn ghost small" id="preview-prev" type="button">‹ Prev</button>
           <span class="pager-info" id="preview-info"></span>
@@ -373,8 +371,7 @@
         </div>
       </div>
       <div class="modal-footer">
-        <a id="preview-download" class="btn" download>Download JPEG</a>
-        <button class="btn ghost" id="preview-toggle-select" type="button">Select</button>
+        <a id="preview-download" class="btn" download>Download</a>
       </div>
     </div>
   </div>

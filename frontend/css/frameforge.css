@@ -115,6 +115,16 @@ h3 { font-size: 14px; text-transform: uppercase; letter-spacing: 1px; color: var
   background: linear-gradient(90deg, var(--red-faint), transparent);
   box-shadow: inset 0 0 12px rgba(170, 0, 0, 0.08);
 }
+.nav-label {
+  padding: 12px 20px 4px;
+  font-size: 11px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-family: var(--mono);
+}
+.nav-sub { padding: 2px 0 8px; }
+.nav-sub a { padding: 7px 20px 7px 36px; font-size: 11px; }
 
 .sidebar-footer { padding: 16px 20px; border-top: 1px solid var(--border); }
 .sidebar-footer .user-email {

@@ -73,6 +73,9 @@ export interface Job {
   completed_at: string | null;
 }
 
+/** Per-format optimization variant state (images: webp/avif/jpg/png; videos: mp4/mkv/webm). */
+export type OptimizationStatus = "queued" | "processing" | "completed" | "failed" | "cancelled";
+
 export type OptBatchStatus = "queued" | "processing" | "completed" | "failed" | "cancelled";
 
 /** A batch of frame images queued for manual optimization to a chosen format. */
@@ -86,6 +89,26 @@ export interface OptBatch {
   total: number;
   processed: number;
   frame_ids: string; // JSON array of frames.id
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+}
+
+/** A format-specific optimization variant of an original media file. */
+export interface Optimization {
+  id: string;
+  job_id: string;
+  media_type: MediaType;
+  format: string;
+  codec: string | null;
+  crf: number | null;
+  quality: number | null;
+  max_dim: number | null;
+  r2_key: string;
+  size: number | null;
+  duration: number | null;
+  status: OptimizationStatus;
   error_message: string | null;
   created_at: string;
   updated_at: string;
