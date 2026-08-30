@@ -67,7 +67,6 @@
   document.querySelectorAll(".nav a[data-view]").forEach((a) => {
     a.addEventListener("click", (e) => {
       e.preventDefault();
-      if (a.dataset.type) state.media.type = a.dataset.type;
       go(a.dataset.view);
     });
   });
@@ -88,10 +87,7 @@
 
   function syncNav() {
     document.querySelectorAll(".nav a").forEach((a) => {
-      const dv = a.dataset.view;
-      let on = dv === state.view;
-      if (dv === "media" && a.dataset.type) on = state.view === "media" && a.dataset.type === state.media.type;
-      a.classList.toggle("active", on);
+      a.classList.toggle("active", a.dataset.view === state.view);
     });
   }
 
